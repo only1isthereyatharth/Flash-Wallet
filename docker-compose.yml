@@ -60,6 +60,64 @@ services:
     networks:
       - flash-network
 
+  # Wallet Core Microservice
+  wallet-core:
+    build:
+      context: ./flash-wallet/wallet-core
+      dockerfile: Dockerfile
+    container_name: wallet-core
+    ports:
+      - "8081:8081"
+    environment:
+      - DB_HOST=postgres-db
+      - DB_PORT=5432
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=postgres
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_SERVERS=kafka:9092
+    depends_on:
+      - postgres-db
+      - redis
+      - kafka
+    networks:
+      - flash-network
+
+  # Audit Worker Microservice
+  audit-worker:
+    build:
+      context: ./flash-wallet/audit-worker
+      dockerfile: Dockerfile
+    container_name: audit-worker
+    ports:
+      - "8082:8082"
+    environment:
+      - DB_HOST=postgres-db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - KAFKA_SERVERS=kafka:9092
+    depends_on:
+      - postgres-db
+      - kafka
+    networks:
+      - flash-network
+
+  # API Gateway Microservice
+  api-gateway:
+    build:
+      context: ./flash-wallet/api-gateway
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - WALLET_CORE_URI=http://wallet-core:8081
+    depends_on:
+      - wallet-core
+    networks:
+      - flash-network
+
 volumes:
   postgres_data:
   redis_data:
