@@ -83,6 +83,12 @@ public class GlobalExceptionHandler {
         return buildResponse(HttpStatus.BAD_REQUEST, "Validation Failed", validationErrors, request);
     }
 
+    @ExceptionHandler(org.springframework.http.converter.HttpMessageNotReadableException.class)
+    public ResponseEntity<ErrorResponse> handleHttpMessageNotReadable(org.springframework.http.converter.HttpMessageNotReadableException ex, HttpServletRequest request) {
+        log.warn("HTTP message not readable (JSON parse error): {}", ex.getMessage());
+        return buildResponse(HttpStatus.BAD_REQUEST, "Malformed JSON", "The request body is malformed or contains invalid data formats (e.g. invalid UUID).", request);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGenericException(Exception ex, HttpServletRequest request) {
         log.error("Unhandled exception caught by global boundary: {}", ex.getMessage(), ex);
