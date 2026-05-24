@@ -1,0 +1,49 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      httpclient:
+        connect-timeout: ${flash.gateway.http-client.connect-timeout-ms}
+        response-timeout: ${flash.gateway.http-client.response-timeout-ms}ms
+
+flash:
+  gateway:
+    services:
+      wallet-core-uri: ${WALLET_CORE_URI:http://localhost:8081}
+    http-client:
+      connect-timeout-ms: ${GATEWAY_CONNECT_TIMEOUT_MS:3000}
+      response-timeout-ms: ${GATEWAY_RESPONSE_TIMEOUT_MS:10000}
+    cors:
+      allowed-origins:
+        - ${FRONTEND_ORIGIN:http://localhost:5173}
+      allowed-methods:
+        - GET
+        - POST
+        - PUT
+        - PATCH
+        - DELETE
+        - OPTIONS
+      allowed-headers:
+        - "*"
+      exposed-headers:
+        - X-Request-Id
+    logging:
+      log-headers: ${GATEWAY_LOG_HEADERS:false}
+      slow-request-threshold-ms: ${GATEWAY_SLOW_REQUEST_THRESHOLD_MS:2000}
+      max-header-value-length: ${GATEWAY_MAX_HEADER_VALUE_LENGTH:120}
+    idempotency:
+      strict-uuid: ${GATEWAY_STRICT_IDEMPOTENCY_UUID:true}
+      required-paths:
+        - /api/v1/wallets/transfer
+        - /api/v1/wallets/deposit
+
+logging:
+  level:
+    root: INFO
+    com.services.apigateway: INFO
+    org.springframework.cloud.gateway: INFO
+    reactor.netty.http.client: INFO
