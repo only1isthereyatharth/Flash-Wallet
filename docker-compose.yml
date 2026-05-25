@@ -62,9 +62,7 @@ services:
 
   # Wallet Core Microservice
   wallet-core:
-    build:
-      context: ./flash-wallet/wallet-core
-      dockerfile: Dockerfile
+    image: yatharthlashkari/wallet-core-0.0.1-snapshot
     container_name: wallet-core
     ports:
       - "8081:8081"
@@ -85,9 +83,7 @@ services:
 
   # Audit Worker Microservice
   audit-worker:
-    build:
-      context: ./flash-wallet/audit-worker
-      dockerfile: Dockerfile
+    image: yatharthlashkari/audit-worker-0.0.1-snapshot
     container_name: audit-worker
     ports:
       - "8082:8082"
@@ -105,9 +101,7 @@ services:
 
   # API Gateway Microservice
   api-gateway:
-    build:
-      context: ./flash-wallet/api-gateway
-      dockerfile: Dockerfile
+    image: yatharthlashkari/api-gateway-0.0.1-snapshot
     container_name: api-gateway
     ports:
       - "8080:8080"

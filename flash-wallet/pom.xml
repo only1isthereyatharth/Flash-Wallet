@@ -37,6 +37,7 @@
 		<java.version>21</java.version>
 		<redisson.version>3.43.0</redisson.version>
 		<lombok.version>1.18.46</lombok.version>
+		<image.version>0.0.1-snapshot</image.version>
 	</properties>
 
 	<dependencyManagement>
@@ -61,8 +62,7 @@
 		</dependency>
 	</dependencies>
 
-	<build>
-		<pluginManagement>
+		<build>
 			<plugins>
 				<plugin>
 					<groupId>org.springframework.boot</groupId>
@@ -82,8 +82,21 @@
 						</annotationProcessorPaths>
 					</configuration>
 				</plugin>
+
+				<plugin>
+					<groupId>com.google.cloud.tools</groupId>
+					<artifactId>jib-maven-plugin</artifactId>
+					<version>3.4.0</version>
+					<configuration>
+						<from>
+							<image>eclipse-temurin:21-jdk</image>
+						</from>
+						<to>
+							<image>yatharthlashkari/${project.artifactId}-${image.version}</image>
+						</to>
+					</configuration>
+				</plugin>
 			</plugins>
-		</pluginManagement>
-	</build>
+		</build>
 
 </project>

@@ -226,20 +226,21 @@ You can run the system in two ways:
 
 ### Option A: Run Everything in Docker (Fully Containerized)
 
-This packages and runs both the database/broker infrastructure and the Spring Boot microservices inside Docker containers.
+This packages and runs both the database/broker infrastructure and the Spring Boot microservices inside Docker containers using the Jib Maven Plugin.
 
-#### 1. Compile the JAR packages
-The Dockerfiles copy the pre-built JAR files into the container. Build the packages locally first:
+#### 1. Build and register Docker images with Jib
+Compile the codebase and build the images directly into your local Docker daemon:
 ```bash
 cd flash-wallet
-mvn clean package -DskipTests
+mvn compile jib:dockerBuild
 cd ..
 ```
+*This compiles the multi-module project and builds the container images (`yatharthlashkari/api-gateway-0.0.1-snapshot`, `yatharthlashkari/wallet-core-0.0.1-snapshot`, and `yatharthlashkari/audit-worker-0.0.1-snapshot`) directly to your local Docker daemon registry.*
 
 #### 2. Start all services
-Run the build-and-up command from the project root directory (where [docker-compose.yml](file:///c:/Users/parth/Flash-Wallet/docker-compose.yml) is located):
+Run the docker-compose command from the project root directory (where [docker-compose.yml](file:///c:/Users/parth/Flash-Wallet/docker-compose.yml) is located):
 ```bash
-docker-compose up --build -d
+docker-compose up -d
 ```
 This builds the Docker images for the gateway, core, and audit services, and boots the entire stack on the following ports:
 * **api-gateway**: `8080` (public perimeter gateway)
