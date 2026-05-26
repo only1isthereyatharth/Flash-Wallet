@@ -29,24 +29,27 @@ import java.time.Instant;
  * 
  * <pre>
  * Step 1 (WalletService):
- *   – Debit sender, save Transaction(status=PENDING)
+ *   – Debit sender, save Transaction(status=DEBIT_COMPLETED)
  *   – Publish TRANSFER_DEBIT_COMPLETED → wallet.saga.events
  *
  * Step 2 (this consumer — happy path):
  *   – Receive TRANSFER_DEBIT_COMPLETED
- *   – Credit receiver, update Transaction(status=SUCCESS)
+ *   – Credit receiver, update Transaction(status=COMPLETED)
  *   – Publish TRANSFER_COMPLETED → wallet.transaction.events
  *
  * Compensation (this consumer — failure path):
- *   – Re-credit sender, update Transaction(status=FAILED)
+ *   – Re-credit sender, update Transaction(status=COMPENSATED)
  *   – Publish TRANSFER_SAGA_FAILED → wallet.transaction.events
+ *
+ * DLT exhaustion (compensation retries exhausted):
+ *   – Transaction marked as FAILED — manual intervention required
  * </pre>
  *
  * <h2>Idempotency</h2>
  * <p>
  * Before applying the credit or compensation, the consumer checks
- * {@code Transaction.status}. If the status is already {@code SUCCESS} or
- * {@code FAILED}, the event is a duplicate delivery and is skipped silently.
+ * {@code Transaction.status}. If the status is not {@code DEBIT_COMPLETED},
+ * the event is a duplicate delivery and is skipped silently.
  * This makes both the credit and the compensation idempotent.
  *
  * <h2>Concurrency &amp; Locks</h2>
@@ -107,7 +110,7 @@ public class TransferSagaConsumer {
                                                                         + event.getTransactionId());
                                 });
 
-                if (transaction.getStatus() != TransactionStatus.PENDING) {
+                if (transaction.getStatus() != TransactionStatus.DEBIT_COMPLETED) {
                         log.info(
                                         "Saga event is a duplicate delivery — already processed. " +
                                                         "transactionId={}, currentStatus={}, skipping.",
@@ -176,7 +179,7 @@ public class TransferSagaConsumer {
                 receiver.setBalance(receiver.getBalance() + event.getAmount());
                 walletRepository.save(receiver);
 
-                transaction.setStatus(TransactionStatus.SUCCESS);
+                transaction.setStatus(TransactionStatus.COMPLETED);
                 transactionRepository.save(transaction);
 
                 // Publish terminal success event to the shared topic (consumed by audit-worker
@@ -188,7 +191,7 @@ public class TransferSagaConsumer {
                                 .receiverWalletId(event.getReceiverWalletId())
                                 .amount(event.getAmount())
                                 .currency(event.getCurrency())
-                                .status("SUCCESS")
+                                .status(TransactionStatus.COMPLETED.name())
                                 .eventType("TRANSFER_COMPLETED")
                                 .timestamp(Instant.now())
                                 .build();
@@ -206,8 +209,8 @@ public class TransferSagaConsumer {
          *
          * <p>
          * <b>Idempotency guard</b>: If {@code Transaction.status} is already
-         * {@code FAILED}, compensation was already applied on a previous retry — skip
-         * silently.
+         * {@code COMPENSATED} or {@code FAILED}, compensation was already applied
+         * on a previous retry — skip silently.
          */
         @Transactional
         public void executeCompensationTx(TransactionEvent event, Transaction transaction) {
@@ -217,10 +220,11 @@ public class TransferSagaConsumer {
                                                 "Transaction not found during saga compensation: "
                                                                 + event.getTransactionId()));
 
-                if (freshTx.getStatus() == TransactionStatus.FAILED) {
+                if (freshTx.getStatus() == TransactionStatus.COMPENSATED
+                    || freshTx.getStatus() == TransactionStatus.FAILED) {
                         log.info(
-                                        "Compensation already applied (idempotent skip): transactionId={}",
-                                        event.getTransactionId());
+                                        "Compensation already applied (idempotent skip): transactionId={}, status={}",
+                                        event.getTransactionId(), freshTx.getStatus());
                         return;
                 }
 
@@ -232,26 +236,26 @@ public class TransferSagaConsumer {
                 sender.setBalance(sender.getBalance() + event.getAmount());
                 walletRepository.save(sender);
 
-                freshTx.setStatus(TransactionStatus.FAILED);
+                freshTx.setStatus(TransactionStatus.COMPENSATED);
                 transactionRepository.save(freshTx);
 
-                // Publish terminal failure event — audit-worker will record this, ops can alert
+                // Publish terminal rollback event — audit-worker will record this, ops can alert
                 // on it
-                TransactionEvent failedEvent = TransactionEvent.builder()
+                TransactionEvent compensatedEvent = TransactionEvent.builder()
                                 .transactionId(event.getTransactionId())
                                 .idempotencyKey(event.getIdempotencyKey())
                                 .senderWalletId(event.getSenderWalletId())
                                 .receiverWalletId(event.getReceiverWalletId())
                                 .amount(event.getAmount())
                                 .currency(event.getCurrency())
-                                .status("FAILED")
+                                .status(TransactionStatus.COMPENSATED.name())
                                 .eventType("TRANSFER_SAGA_FAILED")
                                 .timestamp(Instant.now())
                                 .build();
-                eventProducer.sendTransactionEvent(failedEvent);
+                eventProducer.sendTransactionEvent(compensatedEvent);
 
                 log.warn(
-                                "Saga compensation committed: transactionId={}, sender re-credited amount={}. Transfer has been ROLLED BACK.",
+                                "Saga compensation committed: transactionId={}, sender re-credited amount={}. Transfer has been COMPENSATED.",
                                 event.getTransactionId(), event.getAmount());
         }
 

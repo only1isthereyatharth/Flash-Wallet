@@ -67,15 +67,16 @@ sequenceDiagram
         Core->>Redis: tryLock(lock:wallet:SENDER)
         Note over Core: Sender lock acquired. Start @Transactional block
         Core->>DB: Load sender wallet & validate balance/currency
+        Core->>DB: Insert transaction record (status=INITIATED)
         Core->>DB: Debit sender balance
-        Core->>DB: Insert transaction record (status=PENDING)
+        Core->>DB: Update transaction status to DEBIT_COMPLETED
         Core->>KafkaSaga: Publish TRANSFER_DEBIT_COMPLETED event
         Core-->>DB: Commit Database Transaction
         Core->>Redis: unlock(lock:wallet:SENDER)
     end
 
     Core->>Redis: complete(idempotency:KEY, responseBody, 202 Accepted, TTL=24h)
-    Core-->>Gateway: HTTP 202 Accepted (Status: PENDING)
+    Core-->>Gateway: HTTP 202 Accepted (Status: DEBIT_COMPLETED)
     Gateway-->>Client: HTTP 202 Accepted (with headers X-Request-Id)
 
     Note over Client,Gateway: Step 2: Asynchronous Saga Execution (Credit / Compensate)
@@ -87,7 +88,7 @@ sequenceDiagram
             Core->>Redis: tryLock(lock:wallet:RECEIVER)
             Core->>DB: Load receiver wallet & validate currency
             Core->>DB: Credit receiver balance
-            Core->>DB: Update transaction status to SUCCESS
+            Core->>DB: Update transaction status to COMPLETED
             Core->>KafkaAudit: Publish TRANSFER_COMPLETED event
             Core-->>DB: Commit Transaction
             Core->>Redis: unlock(lock:wallet:RECEIVER)
@@ -97,7 +98,7 @@ sequenceDiagram
             Note over Core: LockManager locks SENDER wallet
             Core->>Redis: tryLock(lock:wallet:SENDER)
             Core->>DB: Re-credit sender balance (Refund)
-            Core->>DB: Update transaction status to FAILED
+            Core->>DB: Update transaction status to COMPENSATED
             Core->>KafkaAudit: Publish TRANSFER_SAGA_FAILED event
             Core-->>DB: Commit Transaction
             Core->>Redis: unlock(lock:wallet:SENDER)
@@ -178,10 +179,26 @@ This project intentionally avoids heavy service discovery systems like Netflix E
 
 ### 6. Choreography-Based Saga Pattern (Distributed Transactions)
 To support high-throughput concurrent transaction processing while maintaining ledger consistency, P2P transfers are implemented as a **Choreography-based Saga** via Kafka.
-* **Step 1 (Debit)**: The sender's wallet is debited synchronously, a transaction record is created with `PENDING` status, and a `TRANSFER_DEBIT_COMPLETED` event is published to the `wallet.saga.events` topic. The API immediately returns a `202 Accepted` response.
-* **Step 2 (Credit)**: The [TransferSagaConsumer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/saga/TransferSagaConsumer.java) consumes the event from `wallet.saga.events`. It locks the receiver's wallet, credits the balance, marks the transaction status as `SUCCESS`, and streams a `TRANSFER_COMPLETED` event to the `wallet.transaction.events` topic for audit.
-* **Compensating Transaction (Refund)**: If Step 2 fails (e.g., due to receiver wallet not found, currency mismatch, or database issues), the consumer initiates a compensating transaction. It locks the sender's wallet, refunds the debited amount, updates the transaction status to `FAILED`, and streams a `TRANSFER_SAGA_FAILED` event to `wallet.transaction.events` for compliance auditing.
-* **Resilience & DLT**: If the compensating transaction fails, Kafka retries with exponential backoff (up to 3 times). If still failing, the event is routed to the Dead-Letter Topic (`wallet.saga.events.DLT`) for manual intervention, raising alert logs.
+* **Step 1 (Debit)**: A write-ahead transaction record is created with `INITIATED` status. The sender's wallet is debited, the transaction status is atomically updated to `DEBIT_COMPLETED`, and a `TRANSFER_DEBIT_COMPLETED` event is published to the `wallet.saga.events` topic — all within a single `@Transactional` commit. The API immediately returns a `202 Accepted` response.
+* **Step 2 (Credit)**: The [TransferSagaConsumer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/saga/TransferSagaConsumer.java) consumes the event from `wallet.saga.events`. It locks the receiver's wallet, credits the balance, marks the transaction status as `COMPLETED`, and streams a `TRANSFER_COMPLETED` event to the `wallet.transaction.events` topic for audit.
+* **Compensating Transaction (Refund)**: If Step 2 fails (e.g., due to receiver wallet not found, currency mismatch, or database issues), the consumer initiates a compensating transaction. It locks the sender's wallet, refunds the debited amount, updates the transaction status to `COMPENSATED`, and streams a `TRANSFER_SAGA_FAILED` event to `wallet.transaction.events` for compliance auditing.
+* **DLT Exhaustion (`FAILED`)**: If the compensating transaction itself fails after all Kafka retries (exponential backoff, up to 3 attempts), the event is routed to the Dead-Letter Topic (`wallet.saga.events.DLT`). The [SagaDltRecoverer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/saga/SagaDltRecoverer.java) marks the transaction as `FAILED` — a catastrophic terminal state indicating money is debited but not returned. This requires immediate manual intervention.
+
+### 7. Write-Ahead Log Pattern (Safe Transaction Status Persistence)
+Transaction statuses are designed so that **only safe-to-retry states** are persisted to the database. A state is safe to persist if and only if:
+1. It is written **atomically with the balance change** in the same `@Transactional` block.
+2. Any retry that sees it can make a safe, unambiguous decision.
+3. A background reconciliation job can understand it without ambiguity.
+
+In-progress states like "currently crediting" or "currently compensating" are **never persisted**, because a crash during these operations would leave the transaction stuck in an unrecoverable state. Instead, the saga consumer uses the `DEBIT_COMPLETED` status as its idempotency guard — if the status is anything other than `DEBIT_COMPLETED`, the event is a duplicate and is skipped.
+
+| Status | Meaning | Who Sets It |
+|---|---|---|
+| `INITIATED` | Record exists, no money moved yet (write-ahead) | `executeTransferTx()` / `executeDepositTx()` |
+| `DEBIT_COMPLETED` | Sender debited; awaiting receiver credit or compensation | `executeTransferTx()` |
+| `COMPLETED` | Terminal success — both debit and credit committed | `executeCreditTx()` / `executeDepositTx()` |
+| `COMPENSATED` | Terminal rollback — sender refunded cleanly | `executeCompensationTx()` |
+| `FAILED` | Terminal error — compensation exhausted; manual intervention required | `SagaDltRecoverer` |
 
 ---
 
@@ -209,7 +226,7 @@ CREATE TABLE transactions (
     sender_wallet_id UUID REFERENCES wallets(id),
     receiver_wallet_id UUID REFERENCES wallets(id),
     amount BIGINT NOT NULL,
-    status VARCHAR(20) NOT NULL, -- PENDING, SUCCESS, FAILED
+    status VARCHAR(20) NOT NULL, -- INITIATED, DEBIT_COMPLETED, COMPLETED, COMPENSATED, FAILED
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -415,7 +432,7 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
     "senderWalletId": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
     "receiverWalletId": "a1811e5c-7d9a-4c28-98e3-5a0d3f82b7db",
     "amount": 15000,
-    "status": "PENDING",
+    "status": "DEBIT_COMPLETED",
     "message": "Transfer initiated. Use the transactionId to poll for the final status."
   }
   ```
@@ -429,11 +446,17 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
   ```json
   {
     "transactionId": "b6a3b2cb-20c2-4876-b633-5c8e2bd06a74",
-    "status": "SUCCESS",
+    "status": "COMPLETED",
     "idempotencyKey": "f2d58bf5-4089-4b68-b80c-7b1981bdeebf"
   }
   ```
-  *(Note: `status` can be `PENDING`, `SUCCESS`, or `FAILED`)*
+  | Status | Meaning |
+  |---|---|
+  | `INITIATED` | Transaction record created, no money moved yet |
+  | `DEBIT_COMPLETED` | Sender debited, awaiting receiver credit (in-flight saga) |
+  | `COMPLETED` | Terminal success — both debit and credit committed |
+  | `COMPENSATED` | Terminal rollback — sender refunded cleanly |
+  | `FAILED` | Terminal error — compensation exhausted, manual intervention required |
 
 ---
 
@@ -502,13 +525,13 @@ curl -X POST http://localhost:8080/api/v1/wallets/transfer \
   -H "Idempotency-Key: f2d58bf5-4089-4b68-b80c-7b1981bdeebf" \
   -d '{"senderWalletId": "<UUID_A>", "receiverWalletId": "<UUID_B>", "amount": 40000, "currency": "INR"}'
 ```
-* **Expected Result:** HTTP `202 Accepted` with status `PENDING` and a `transactionId`. Balance in Wallet A drops to `60000`, but Wallet B is not yet credited.
+* **Expected Result:** HTTP `202 Accepted` with status `DEBIT_COMPLETED` and a `transactionId`. Balance in Wallet A drops to `60000`, but Wallet B is not yet credited.
 
 ### 5. Poll Transaction Status
 ```bash
 curl http://localhost:8080/api/v1/wallets/transactions/<transactionId>
 ```
-* **Expected Result:** HTTP `200 OK` with status `SUCCESS`. Verify that Wallet B is now credited with `40000`.
+* **Expected Result:** HTTP `200 OK` with status `COMPLETED`. Verify that Wallet B is now credited with `40000`.
 
 ### 6. Verify Asynchronous Compliance Logging
 Query the `audit_worker_db` to check if Kafka successfully streamed and processed the event:

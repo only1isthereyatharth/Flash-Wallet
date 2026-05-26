@@ -88,14 +88,18 @@ try {
 
     /**
      * Saga Step 1: validates the transfer request, debits the sender, and
-     * records the transaction as {@code PENDING}.
+     * records the transaction as {@code DEBIT_COMPLETED}.
+     *
+     * <p>A write-ahead record with status {@code INITIATED} is persisted before
+     * any balance mutation. If the debit succeeds, the status is atomically
+     * updated to {@code DEBIT_COMPLETED} in the same {@code @Transactional} commit.
      *
      * <p>This method publishes a {@code TRANSFER_DEBIT_COMPLETED} event to
      * {@code wallet.saga.events}. The {@link com.services.wallet.saga.TransferSagaConsumer}
      * picks this up and performs Step 2 (receiver credit) or the compensating
      * transaction (sender re-credit) if the credit fails.
      *
-     * <p>The response status is {@code "PENDING"} — the transfer is not yet complete.
+     * <p>The response status is {@code "DEBIT_COMPLETED"} — the transfer is not yet complete.
      * Callers should poll {@code GET /api/v1/wallets/transactions/{transactionId}}
      * to determine the final outcome.
      */
@@ -112,6 +116,17 @@ try {
             throw new IllegalArgumentException("Currency mismatch between wallets and request: expected " + request.getCurrency());
         }
 
+        // ── Record transaction as INITIATED (write-ahead) ────────────────────
+        Transaction transaction = Transaction.builder()
+                .id(UUID.randomUUID())
+                .idempotencyKey(idempotencyKey)
+                .senderWalletId(sender.getId())
+                .receiverWalletId(receiver.getId())
+                .amount(request.getAmount())
+                .status(TransactionStatus.INITIATED)
+                .build();
+        transactionRepository.save(transaction);
+
         if (sender.getBalance() < request.getAmount()) {
             log.warn("Transfer failed: Insufficient balance in sender wallet. Balance={}, Attempted={}",
                     sender.getBalance(), request.getAmount());
@@ -122,15 +137,8 @@ try {
         sender.setBalance(sender.getBalance() - request.getAmount());
         walletRepository.save(sender);
 
-        // ── Record transaction as PENDING ────────────────────────────────────
-        Transaction transaction = Transaction.builder()
-                .id(UUID.randomUUID())
-                .idempotencyKey(idempotencyKey)
-                .senderWalletId(sender.getId())
-                .receiverWalletId(receiver.getId())
-                .amount(request.getAmount())
-                .status(TransactionStatus.PENDING)
-                .build();
+        // ── Update transaction to DEBIT_COMPLETED ────────────────────────────
+        transaction.setStatus(TransactionStatus.DEBIT_COMPLETED);
         transactionRepository.save(transaction);
 
         // ── Publish to saga coordination topic ───────────────────────────────
@@ -143,13 +151,13 @@ try {
                 .receiverWalletId(receiver.getId())
                 .amount(request.getAmount())
                 .currency(sender.getCurrency())
-                .status("PENDING")
+                .status(TransactionStatus.DEBIT_COMPLETED.name())
                 .eventType("TRANSFER_DEBIT_COMPLETED")
                 .timestamp(Instant.now())
                 .build();
         kafkaTemplate.send(KafkaConfig.SAGA_EVENTS_TOPIC, transaction.getId().toString(), sagaEvent);
 
-        log.info("Saga Step 1 committed: transactionId={}, senderWalletId={}, amount={}, status=PENDING",
+        log.info("Saga Step 1 committed: transactionId={}, senderWalletId={}, amount={}, status=DEBIT_COMPLETED",
                 transaction.getId(), sender.getId(), request.getAmount());
 
         return TransferResponse.builder()
@@ -157,7 +165,7 @@ try {
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
                 .amount(request.getAmount())
-                .status("PENDING")
+                .status("DEBIT_COMPLETED")
                 .message("Transfer initiated. Use the transactionId to poll for the final status.")
                 .build();
     }
@@ -174,18 +182,22 @@ try {
             throw new IllegalArgumentException("Currency mismatch for deposit: expected " + wallet.getCurrency());
         }
 
-        wallet.setBalance(wallet.getBalance() + request.getAmount());
-        walletRepository.save(wallet);
-
-        // Record transaction
+        // ── Record transaction as INITIATED (write-ahead) ────────────────────
         Transaction transaction = Transaction.builder()
                 .id(UUID.randomUUID())
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(null) // null represents external ledger system deposit
                 .receiverWalletId(wallet.getId())
                 .amount(request.getAmount())
-                .status(TransactionStatus.SUCCESS)
+                .status(TransactionStatus.INITIATED)
                 .build();
+        transactionRepository.save(transaction);
+
+        wallet.setBalance(wallet.getBalance() + request.getAmount());
+        walletRepository.save(wallet);
+
+        // ── Update transaction to COMPLETED ──────────────────────────────────
+        transaction.setStatus(TransactionStatus.COMPLETED);
         transactionRepository.save(transaction);
 
         // Stream transaction event to Kafka
@@ -196,7 +208,7 @@ try {
                 .receiverWalletId(wallet.getId())
                 .amount(request.getAmount())
                 .currency(wallet.getCurrency())
-                .status("SUCCESS")
+                .status(TransactionStatus.COMPLETED.name())
                 .eventType("WALLET_DEPOSIT_COMPLETED")
                 .timestamp(Instant.now())
                 .build();

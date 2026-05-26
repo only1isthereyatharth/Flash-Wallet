@@ -1,5 +1,10 @@
 package com.services.wallet.saga;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.services.wallet.event.TransactionEvent;
+import com.services.wallet.model.Transaction;
+import com.services.wallet.model.TransactionStatus;
+import com.services.wallet.repository.TransactionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -10,8 +15,10 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -48,6 +55,8 @@ public class SagaDltRecoverer implements ConsumerRecordRecoverer {
      */
     private final KafkaTemplate<String, String> sagaStringKafkaTemplate;
     private final SagaProperties sagaProperties;
+    private final TransactionRepository transactionRepository;
+    private final ObjectMapper objectMapper;
 
     @Override
     public void accept(ConsumerRecord<?, ?> record, Exception exception) {
@@ -95,6 +104,9 @@ public class SagaDltRecoverer implements ConsumerRecordRecoverer {
                 record.key(),
                 sendResult.getRecordMetadata().partition(),
                 sendResult.getRecordMetadata().offset());
+
+        // Mark the transaction as FAILED — catastrophic terminal state
+        markTransactionFailed(record);
     }
 
     private ProducerRecord<String, String> buildDltRecord(ConsumerRecord<?, ?> record, Exception exception) {
@@ -125,5 +137,42 @@ public class SagaDltRecoverer implements ConsumerRecordRecoverer {
 
     private byte[] toBytes(String value) {
         return value == null ? new byte[0] : value.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Best-effort attempt to mark the transaction as {@code FAILED} after DLT routing.
+     * This is a catastrophic terminal state: money is debited but not returned.
+     * If this fails (e.g., DB is down), the DLT record still exists for manual recovery.
+     */
+    @Transactional
+    protected void markTransactionFailed(ConsumerRecord<?, ?> record) {
+        try {
+            if (record.value() == null) {
+                log.warn("Cannot mark transaction FAILED — DLT record has null value");
+                return;
+            }
+            TransactionEvent event = objectMapper.readValue(
+                    record.value().toString(), TransactionEvent.class);
+            Optional<Transaction> optTx = transactionRepository.findById(event.getTransactionId());
+            if (optTx.isEmpty()) {
+                log.error("CRITICAL — Transaction not found for DLT event, manual reconciliation required: transactionId={}",
+                        event.getTransactionId());
+                return;
+            }
+            Transaction tx = optTx.get();
+            if (tx.getStatus() == TransactionStatus.COMPENSATED
+                || tx.getStatus() == TransactionStatus.COMPLETED) {
+                log.info("Transaction already in terminal state {}, skipping FAILED mark: transactionId={}",
+                        tx.getStatus(), event.getTransactionId());
+                return;
+            }
+            tx.setStatus(TransactionStatus.FAILED);
+            transactionRepository.save(tx);
+            log.error("CRITICAL — Transaction marked FAILED, manual reconciliation required: transactionId={}",
+                    event.getTransactionId());
+        } catch (Exception ex) {
+            log.error("Failed to mark transaction as FAILED after DLT routing. " +
+                    "DLT record exists for manual recovery. record.key={}", record.key(), ex);
+        }
     }
 }
