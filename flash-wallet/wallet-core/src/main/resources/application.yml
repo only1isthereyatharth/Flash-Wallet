@@ -53,3 +53,15 @@ logging:
     com.services: DEBUG
     org.hibernate.SQL: INFO
     org.redisson: INFO
+
+# Saga configuration — binds to com.services.wallet.saga.SagaProperties
+wallet:
+  saga:
+    topic: wallet.saga.events
+    dlt-topic: wallet.saga.events.DLT
+    listener-concurrency: 1   # Keep at 1 for deterministic in-order saga processing
+    retry:
+      max-retries: 3
+      initial-interval-ms: 1000
+      multiplier: 2.0
+      max-interval-ms: 8000   # 1s → 2s → 4s → 8s max cap

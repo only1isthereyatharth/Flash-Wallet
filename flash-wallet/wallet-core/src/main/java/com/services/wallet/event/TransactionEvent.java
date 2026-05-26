@@ -21,6 +21,7 @@ public class TransactionEvent implements Serializable {
     private UUID senderWalletId;
     private UUID receiverWalletId;
     private Long amount; // stored in Paisa/Cents
+    private String currency;
     private String status;
     private String eventType;
     private Instant timestamp;
