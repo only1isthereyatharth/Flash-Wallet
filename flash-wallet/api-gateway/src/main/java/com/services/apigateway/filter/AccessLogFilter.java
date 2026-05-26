@@ -58,7 +58,7 @@ public class AccessLogFilter implements GlobalFilter, Ordered {
 
     @Override
     public int getOrder() {
-        return Ordered.HIGHEST_PRECEDENCE + 5;
+        return Ordered.HIGHEST_PRECEDENCE + 5; // Second in precedence
     }
 
     private void logCompletion(ServerWebExchange exchange, String traceId, long startTimeNanos, Throwable failure) {

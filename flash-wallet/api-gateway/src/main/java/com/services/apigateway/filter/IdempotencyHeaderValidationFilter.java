@@ -66,7 +66,7 @@ public class IdempotencyHeaderValidationFilter implements GlobalFilter, Ordered 
 
     @Override
     public int getOrder() {
-        return Ordered.HIGHEST_PRECEDENCE + 10;
+        return Ordered.HIGHEST_PRECEDENCE + 10; // Third in precedence
     }
 
     private boolean requiresIdempotencyHeader(String requestPath) {

@@ -12,46 +12,46 @@ public class AuditEventValidationService {
     private static final String DEPOSIT_COMPLETED = "WALLET_DEPOSIT_COMPLETED";
 
     public void validate(TransactionEventMessage event) {
-        if (event.getTransactionId() == null) {
+        if (event.transactionId() == null) {
             throw new AuditEventValidationException("Missing required field: transactionId");
         }
-        if (event.getAmount() == null) {
+        if (event.amount() == null) {
             throw new AuditEventValidationException("Missing required field: amount");
         }
-        if (event.getAmount() <= 0L) {
+        if (event.amount() <= 0L) {
             throw new AuditEventValidationException("Amount must be greater than zero");
         }
-        if (!StringUtils.hasText(event.getStatus())) {
+        if (!StringUtils.hasText(event.status())) {
             throw new AuditEventValidationException("Missing required field: status");
         }
-        if (!StringUtils.hasText(event.getEventType())) {
+        if (!StringUtils.hasText(event.eventType())) {
             throw new AuditEventValidationException("Missing required field: eventType");
         }
-        if (event.getTimestamp() == null) {
+        if (event.timestamp() == null) {
             throw new AuditEventValidationException("Missing required field: timestamp");
         }
 
-        String normalizedEventType = event.getEventType().trim();
+        String normalizedEventType = event.eventType().trim();
         switch (normalizedEventType) {
             case TRANSFER_COMPLETED -> validateTransferEvent(event);
             case DEPOSIT_COMPLETED -> validateDepositEvent(event);
-            default -> throw new AuditEventValidationException("Unsupported eventType: " + event.getEventType());
+            default -> throw new AuditEventValidationException("Unsupported eventType: " + event.eventType());
         }
     }
 
     private void validateTransferEvent(TransactionEventMessage event) {
-        if (event.getSenderWalletId() == null) {
+        if (event.senderWalletId() == null) {
             throw new AuditEventValidationException(
                     "senderWalletId is required for eventType " + TRANSFER_COMPLETED);
         }
-        if (event.getReceiverWalletId() == null) {
+        if (event.receiverWalletId() == null) {
             throw new AuditEventValidationException(
                     "receiverWalletId is required for eventType " + TRANSFER_COMPLETED);
         }
     }
 
     private void validateDepositEvent(TransactionEventMessage event) {
-        if (event.getReceiverWalletId() == null) {
+        if (event.receiverWalletId() == null) {
             throw new AuditEventValidationException(
                     "receiverWalletId is required for eventType " + DEPOSIT_COMPLETED);
         }

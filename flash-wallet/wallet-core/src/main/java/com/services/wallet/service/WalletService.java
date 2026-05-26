@@ -44,12 +44,12 @@ public class WalletService {
      */
     public TransferResponse transfer(TransferRequest request, String idempotencyKey) {
         log.info("Initiating P2P transfer from wallet {} to wallet {} of amount {}", 
-                request.getSenderWalletId(), request.getReceiverWalletId(), request.getAmount());
+                request.senderWalletId(), request.receiverWalletId(), request.amount());
         try {
             // Lock ordering happens internally in lockManager
             return lockManager.executeWithDoubleLocks(
-                    request.getSenderWalletId(),
-                    request.getReceiverWalletId(),
+                    request.senderWalletId(),
+                    request.receiverWalletId(),
                     5000, // 5 seconds max wait to acquire locks
                     10000, // 10 seconds auto-lease guard
                     () -> self.executeTransferTx(request, idempotencyKey)
@@ -66,10 +66,10 @@ public class WalletService {
      * Executes a deposit into a single wallet.
      */
     public WalletResponse deposit(DepositRequest request, String idempotencyKey) {
-        log.info("Initiating deposit to wallet {} of amount {}", request.getWalletId(), request.getAmount());
-try {
+        log.info("Initiating deposit to wallet {} of amount {}", request.walletId(), request.amount());
+        try {
             return lockManager.executeWithLock(
-                    request.getWalletId(),
+                    request.walletId(),
                     5000,
                     10000,
                     () -> self.executeDepositTx(request, idempotencyKey)
@@ -88,27 +88,27 @@ try {
     @Transactional
     public TransferResponse executeTransferTx(TransferRequest request, String idempotencyKey) {
         // Load wallets
-        Wallet sender = walletRepository.findById(request.getSenderWalletId())
-                .orElseThrow(() -> new WalletNotFoundException("Sender wallet not found: " + request.getSenderWalletId()));
-        Wallet receiver = walletRepository.findById(request.getReceiverWalletId())
-                .orElseThrow(() -> new WalletNotFoundException("Receiver wallet not found: " + request.getReceiverWalletId()));
+        Wallet sender = walletRepository.findById(request.senderWalletId())
+                .orElseThrow(() -> new WalletNotFoundException("Sender wallet not found: " + request.senderWalletId()));
+        Wallet receiver = walletRepository.findById(request.receiverWalletId())
+                .orElseThrow(() -> new WalletNotFoundException("Receiver wallet not found: " + request.receiverWalletId()));
 
         // Validate currencies match request
-        if (!sender.getCurrency().equalsIgnoreCase(request.getCurrency()) || 
-            !receiver.getCurrency().equalsIgnoreCase(request.getCurrency())) {
-            throw new IllegalArgumentException("Currency mismatch between wallets and request: expected " + request.getCurrency());
+        if (!sender.getCurrency().equalsIgnoreCase(request.currency()) || 
+            !receiver.getCurrency().equalsIgnoreCase(request.currency())) {
+            throw new IllegalArgumentException("Currency mismatch between wallets and request: expected " + request.currency());
         }
 
         // Check sufficient funds
-        if (sender.getBalance() < request.getAmount()) {
+        if (sender.getBalance() < request.amount()) {
             log.warn("Transfer failed: Insufficient balance in sender wallet. Balance={}, Attempted={}", 
-                    sender.getBalance(), request.getAmount());
+                    sender.getBalance(), request.amount());
             throw new InsufficientBalanceException("Insufficient balance in wallet: " + sender.getId());
         }
 
         // Deduct and credit
-        sender.setBalance(sender.getBalance() - request.getAmount());
-        receiver.setBalance(receiver.getBalance() + request.getAmount());
+        sender.setBalance(sender.getBalance() - request.amount());
+        receiver.setBalance(receiver.getBalance() + request.amount());
 
         // Save (Hibernate version triggers JPA optimistic locking fallback checks)
         walletRepository.save(sender);
@@ -120,7 +120,7 @@ try {
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
                 .status(TransactionStatus.SUCCESS)
                 .build();
         transactionRepository.save(transaction);
@@ -131,7 +131,8 @@ try {
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
+                .currency(sender.getCurrency())
                 .status("SUCCESS")
                 .eventType("WALLET_TRANSFER_COMPLETED")
                 .timestamp(Instant.now())
@@ -144,7 +145,7 @@ try {
                 .transactionId(transaction.getId())
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
                 .status("SUCCESS")
                 .message("Transfer completed successfully")
                 .build();
@@ -155,14 +156,14 @@ try {
      */
     @Transactional
     public WalletResponse executeDepositTx(DepositRequest request, String idempotencyKey) {
-        Wallet wallet = walletRepository.findById(request.getWalletId())
-                .orElseThrow(() -> new WalletNotFoundException("Wallet not found: " + request.getWalletId()));
+        Wallet wallet = walletRepository.findById(request.walletId())
+                .orElseThrow(() -> new WalletNotFoundException("Wallet not found: " + request.walletId()));
 
-        if (!wallet.getCurrency().equalsIgnoreCase(request.getCurrency())) {
+        if (!wallet.getCurrency().equalsIgnoreCase(request.currency())) {
             throw new IllegalArgumentException("Currency mismatch for deposit: expected " + wallet.getCurrency());
         }
 
-        wallet.setBalance(wallet.getBalance() + request.getAmount());
+        wallet.setBalance(wallet.getBalance() + request.amount());
         walletRepository.save(wallet);
 
         // Record transaction
@@ -171,7 +172,7 @@ try {
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(null) // null represents external ledger system deposit
                 .receiverWalletId(wallet.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
                 .status(TransactionStatus.SUCCESS)
                 .build();
         transactionRepository.save(transaction);
@@ -182,7 +183,8 @@ try {
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(null)
                 .receiverWalletId(wallet.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
+                .currency(wallet.getCurrency())
                 .status("SUCCESS")
                 .eventType("WALLET_DEPOSIT_COMPLETED")
                 .timestamp(Instant.now())

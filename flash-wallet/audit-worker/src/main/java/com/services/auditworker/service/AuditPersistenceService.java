@@ -22,8 +22,8 @@ public class AuditPersistenceService {
     @Transactional
     public void persist(ConsumerRecord<String, String> record, TransactionEventMessage event, String rawPayload) {
         AuditLog auditLog = AuditLog.builder()
-                .transactionId(event.getTransactionId())
-                .eventType(event.getEventType())
+                .transactionId(event.transactionId())
+                .eventType(event.eventType())
                 .payload(rawPayload)
                 .kafkaPartition(record.partition())
                 .kafkaOffset(record.offset())
@@ -34,16 +34,16 @@ public class AuditPersistenceService {
             log.info(
                     "Audit log persisted successfully: auditLogId={}, transactionId={}, topic={}, partition={}, offset={}, eventType={}",
                     savedAuditLog.getId(),
-                    event.getTransactionId(),
+                    event.transactionId(),
                     record.topic(),
                     record.partition(),
                     record.offset(),
-                    event.getEventType());
+                    event.eventType());
         } catch (RuntimeException ex) {
             if (PersistenceExceptionClassifier.isDuplicateConstraint(ex, DUPLICATE_AUDIT_LOG_CONSTRAINT)) {
                 log.warn(
                         "Duplicate audit redelivery ignored: transactionId={}, topic={}, partition={}, offset={}, key={}",
-                        event.getTransactionId(),
+                        event.transactionId(),
                         record.topic(),
                         record.partition(),
                         record.offset(),
@@ -53,7 +53,7 @@ public class AuditPersistenceService {
 
             log.error(
                     "Failed to persist audit log: transactionId={}, topic={}, partition={}, offset={}, key={}",
-                    event.getTransactionId(),
+                    event.transactionId(),
                     record.topic(),
                     record.partition(),
                     record.offset(),

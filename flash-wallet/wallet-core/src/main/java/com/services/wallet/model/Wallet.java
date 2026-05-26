@@ -1,6 +1,7 @@
 package com.services.wallet.model;
 
 import jakarta.persistence.*;
+import jakarta.validation.constraints.PositiveOrZero;
 import lombok.*;
 import org.hibernate.annotations.UpdateTimestamp;
 
@@ -22,6 +23,7 @@ public class Wallet {
     private UUID userId;
 
     @Column(name = "balance", nullable = false)
+    @PositiveOrZero(message = "Balance should be greater than or equal to 0")
     private Long balance; // Stored in lowest unit (Paisa/Cents)
 
     @Column(name = "currency", nullable = false, length = 3)
