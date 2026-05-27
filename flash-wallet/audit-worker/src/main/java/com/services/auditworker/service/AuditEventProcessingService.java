@@ -24,8 +24,8 @@ public class AuditEventProcessingService {
 
         log.info(
                 "Audit event parsed successfully: transactionId={}, eventType={}, topic={}, partition={}, offset={}",
-                event.getTransactionId(),
-                event.getEventType(),
+                event.transactionId(),
+                event.eventType(),
                 record.topic(),
                 record.partition(),
                 record.offset());
@@ -35,7 +35,7 @@ public class AuditEventProcessingService {
         } catch (AuditEventValidationException ex) {
             log.warn(
                     "Audit event validation failed: transactionId={}, topic={}, partition={}, offset={}, key={}, reason={}",
-                    event.getTransactionId(),
+                    event.transactionId(),
                     record.topic(),
                     record.partition(),
                     record.offset(),
@@ -46,8 +46,8 @@ public class AuditEventProcessingService {
 
         log.info(
                 "Audit event validated successfully: transactionId={}, eventType={}, topic={}, partition={}, offset={}",
-                event.getTransactionId(),
-                event.getEventType(),
+                event.transactionId(),
+                event.eventType(),
                 record.topic(),
                 record.partition(),
                 record.offset());

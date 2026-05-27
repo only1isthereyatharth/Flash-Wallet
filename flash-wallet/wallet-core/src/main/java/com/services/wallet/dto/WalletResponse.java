@@ -1,22 +1,30 @@
 package com.services.wallet.dto;
 
-import lombok.AllArgsConstructor;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
 
 import java.time.Instant;
 import java.util.UUID;
 
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
 @Builder
-public class WalletResponse {
-    private UUID id;
-    private UUID userId;
-    private Long balance; // lowest unit (Paisa)
-    private String currency;
-    private Integer version;
-    private Instant updatedAt;
-}
+public record WalletResponse(
+    @NotNull(message = "Wallet ID is required")
+    UUID id,
+
+    @NotNull(message = "User ID is required")
+    UUID userId,
+
+    @NotNull(message = "Balance is required")
+    @PositiveOrZero(message = "Balance must be positive or zero")
+    Long balance,
+
+    @NotBlank(message = "Currency is required")
+    @Size(min = 3, max = 3, message = "Currency code must be exactly 3 characters")
+    String currency,
+
+    @NotNull(message = "Updated at timestamp is required")
+    Instant updatedAt
+) {}

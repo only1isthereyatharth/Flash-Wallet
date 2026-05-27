@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.services.auditworker.exception.AuditEventDeserializationException;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.Test;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -21,7 +22,8 @@ class AuditEventProcessingServiceTest {
             }
         };
         AuditEventProcessingService processingService = new AuditEventProcessingService(
-                new ObjectMapper().findAndRegisterModules(),
+                new ObjectMapper().findAndRegisterModules()
+                        .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, true),
                 validationService,
                 persistenceService);
 

@@ -26,8 +26,8 @@ public class WalletController {
 
     @PostMapping
     public ResponseEntity<WalletResponse> createWallet(@RequestBody @Valid CreateWalletRequest request) {
-        log.info("REST: Request to create wallet for user: {}", request.getUserId());
-        WalletResponse response = walletService.createWallet(request.getUserId(), request.getCurrency());
+        log.info("REST: Request to create wallet for user: {}", request.userId());
+        WalletResponse response = walletService.createWallet(request.userId(), request.currency());
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 

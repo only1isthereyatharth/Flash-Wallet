@@ -22,8 +22,8 @@ public class WalletEventProducer {
      * Uses transaction ID as partition key to ensure order sequence preservation.
      */
     public void sendTransactionEvent(TransactionEvent event) {
-        String key = event.getTransactionId().toString();
-        log.info("Publishing event to Kafka: ID={}, EventType={}, Status={}", key, event.getEventType(), event.getStatus());
+        String key = event.transactionId().toString();
+        log.info("Publishing event to Kafka: ID={}, EventType={}, Status={}", key, event.eventType(), event.status());
 
         CompletableFuture<SendResult<String, TransactionEvent>> future = 
                 kafkaTemplate.send(KafkaConfig.TRANSACTION_EVENTS_TOPIC, key, event);

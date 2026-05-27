@@ -48,12 +48,12 @@ public class WalletService {
      */
     public TransferResponse transfer(TransferRequest request, String idempotencyKey) {
         log.info("Initiating P2P transfer from wallet {} to wallet {} of amount {}", 
-                request.getSenderWalletId(), request.getReceiverWalletId(), request.getAmount());
+                request.senderWalletId(), request.receiverWalletId(), request.amount());
         try {
             // Step 1 only requires locking the sender's wallet.
             // Receiver is locked during Step 2 in TransferSagaConsumer.
             return lockManager.executeWithLock(
-                    request.getSenderWalletId(),
+                    request.senderWalletId(),
                     5000, // 5 seconds max wait to acquire locks
                     10000, // 10 seconds auto-lease guard
                     () -> self.executeTransferTx(request, idempotencyKey)
@@ -70,10 +70,10 @@ public class WalletService {
      * Executes a deposit into a single wallet.
      */
     public WalletResponse deposit(DepositRequest request, String idempotencyKey) {
-        log.info("Initiating deposit to wallet {} of amount {}", request.getWalletId(), request.getAmount());
-try {
+        log.info("Initiating deposit to wallet {} of amount {}", request.walletId(), request.amount());
+        try {
             return lockManager.executeWithLock(
-                    request.getWalletId(),
+                    request.walletId(),
                     5000,
                     10000,
                     () -> self.executeDepositTx(request, idempotencyKey)
@@ -105,39 +105,41 @@ try {
      */
     @Transactional
     public TransferResponse executeTransferTx(TransferRequest request, String idempotencyKey) {
-        // ── Load and validate ────────────────────────────────────────────────
-        Wallet sender = walletRepository.findById(request.getSenderWalletId())
-                .orElseThrow(() -> new WalletNotFoundException("Sender wallet not found: " + request.getSenderWalletId()));
-        Wallet receiver = walletRepository.findById(request.getReceiverWalletId())
-                .orElseThrow(() -> new WalletNotFoundException("Receiver wallet not found: " + request.getReceiverWalletId()));
+        // Load wallets
+        Wallet sender = walletRepository.findById(request.senderWalletId())
+                .orElseThrow(() -> new WalletNotFoundException("Sender wallet not found: " + request.senderWalletId()));
+        Wallet receiver = walletRepository.findById(request.receiverWalletId())
+                .orElseThrow(() -> new WalletNotFoundException("Receiver wallet not found: " + request.receiverWalletId()));
 
-        if (!sender.getCurrency().equalsIgnoreCase(request.getCurrency()) ||
-            !receiver.getCurrency().equalsIgnoreCase(request.getCurrency())) {
-            throw new IllegalArgumentException("Currency mismatch between wallets and request: expected " + request.getCurrency());
+        // Validate currencies match request
+        if (!sender.getCurrency().equalsIgnoreCase(request.currency()) || 
+            !receiver.getCurrency().equalsIgnoreCase(request.currency())) {
+            throw new IllegalArgumentException("Currency mismatch between wallets and request: expected " + request.currency());
         }
 
-        // ── Record transaction as INITIATED (write-ahead) ────────────────────
+        // Check sufficient funds
+        if (sender.getBalance() < request.amount()) {
+            log.warn("Transfer failed: Insufficient balance in sender wallet. Balance={}, Attempted={}", 
+                    sender.getBalance(), request.amount());
+            throw new InsufficientBalanceException("Insufficient balance in wallet: " + sender.getId());
+        }
+
+        // 1. Persist write-ahead Transaction with status INITIATED
         Transaction transaction = Transaction.builder()
                 .id(UUID.randomUUID())
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
                 .status(TransactionStatus.INITIATED)
                 .build();
         transactionRepository.save(transaction);
 
-        if (sender.getBalance() < request.getAmount()) {
-            log.warn("Transfer failed: Insufficient balance in sender wallet. Balance={}, Attempted={}",
-                    sender.getBalance(), request.getAmount());
-            throw new InsufficientBalanceException("Insufficient balance in wallet: " + sender.getId());
-        }
-
-        // ── Step 1: Debit sender ─────────────────────────────────────────────
-        sender.setBalance(sender.getBalance() - request.getAmount());
+        // 2. Deduct from sender
+        sender.setBalance(sender.getBalance() - request.amount());
         walletRepository.save(sender);
 
-        // ── Update transaction to DEBIT_COMPLETED ────────────────────────────
+        // 3. Update transaction to DEBIT_COMPLETED
         transaction.setStatus(TransactionStatus.DEBIT_COMPLETED);
         transactionRepository.save(transaction);
 
@@ -149,7 +151,7 @@ try {
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
                 .currency(sender.getCurrency())
                 .status(TransactionStatus.DEBIT_COMPLETED.name())
                 .eventType("TRANSFER_DEBIT_COMPLETED")
@@ -158,13 +160,13 @@ try {
         kafkaTemplate.send(KafkaConfig.SAGA_EVENTS_TOPIC, transaction.getId().toString(), sagaEvent);
 
         log.info("Saga Step 1 committed: transactionId={}, senderWalletId={}, amount={}, status=DEBIT_COMPLETED",
-                transaction.getId(), sender.getId(), request.getAmount());
+                transaction.getId(), sender.getId(), request.amount());
 
         return TransferResponse.builder()
                 .transactionId(transaction.getId())
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
                 .status("DEBIT_COMPLETED")
                 .message("Transfer initiated. Use the transactionId to poll for the final status.")
                 .build();
@@ -175,10 +177,10 @@ try {
      */
     @Transactional
     public WalletResponse executeDepositTx(DepositRequest request, String idempotencyKey) {
-        Wallet wallet = walletRepository.findById(request.getWalletId())
-                .orElseThrow(() -> new WalletNotFoundException("Wallet not found: " + request.getWalletId()));
+        Wallet wallet = walletRepository.findById(request.walletId())
+                .orElseThrow(() -> new WalletNotFoundException("Wallet not found: " + request.walletId()));
 
-        if (!wallet.getCurrency().equalsIgnoreCase(request.getCurrency())) {
+        if (!wallet.getCurrency().equalsIgnoreCase(request.currency())) {
             throw new IllegalArgumentException("Currency mismatch for deposit: expected " + wallet.getCurrency());
         }
 
@@ -188,12 +190,13 @@ try {
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(null) // null represents external ledger system deposit
                 .receiverWalletId(wallet.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
                 .status(TransactionStatus.INITIATED)
                 .build();
         transactionRepository.save(transaction);
 
-        wallet.setBalance(wallet.getBalance() + request.getAmount());
+        // Update balance
+        wallet.setBalance(wallet.getBalance() + request.amount());
         walletRepository.save(wallet);
 
         // ── Update transaction to COMPLETED ──────────────────────────────────
@@ -206,7 +209,7 @@ try {
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(null)
                 .receiverWalletId(wallet.getId())
-                .amount(request.getAmount())
+                .amount(request.amount())
                 .currency(wallet.getCurrency())
                 .status(TransactionStatus.COMPLETED.name())
                 .eventType("WALLET_DEPOSIT_COMPLETED")
@@ -257,7 +260,6 @@ try {
                 .userId(wallet.getUserId())
                 .balance(wallet.getBalance())
                 .currency(wallet.getCurrency())
-                .version(wallet.getVersion())
                 .updatedAt(wallet.getUpdatedAt())
                 .build();
     }

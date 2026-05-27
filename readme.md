@@ -45,10 +45,11 @@ sequenceDiagram
 
     Note over Client,Gateway: Step 1: Synchronous Debit & Saga Initiation
     Client->>Gateway: POST /api/v1/wallets/transfer (Idempotency-Key, Payload)
-    Note over Gateway: CorrelationIdFilter generates X-Request-Id<br/>IdempotencyHeaderValidationFilter verifies UUID
+    Note over Gateway: CorrelationIdFilter generates X-Request-Id<br/>IdempotencyHeaderValidationFilter verifies UUID<br/>RateLimiterFilter checks per-client quota<br/>RequestSizeFilter rejects payloads > 10 KB
     Gateway->>Core: Forwarded Request
     
     rect rgb(25, 25, 35)
+        Note over Core: SanitizationAspect trims & HTML-escapes all String fields
         Note over Core: IdempotencyAspect intercepts request
         Core->>Redis: setIfAbsent(idempotency:KEY, "PROCESSING", TTL=5m)
         alt Key Already exists (Conflict / Replay)
@@ -136,9 +137,9 @@ The backend codebase is organized as a Maven multi-module project (defined in [p
 
 | Microservice | Port | Description | Configuration File |
 | :--- | :--- | :--- | :--- |
-| **[api-gateway](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway)** | `8080` | perimeter API Gateway using Spring Cloud Gateway. Terminates CORS, generates request trace IDs, and rejects requests missing proper idempotency headers. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/resources/application.yml) |
-| **[wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core)** | `8081` | Core Domain Service. Manages wallets, executes transfers, acquires distributed locks, and publishes event events to Kafka. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/resources/application.yml) |
-| **[audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker)** | `8082` | Compliance Audit Consumer. Consumes events asynchronously from Kafka, stores logs in JSONB format, and handles dead-letter recoveries. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/resources/application.yml) |
+| **[api-gateway](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway)** | `8080` | Perimeter API Gateway using Spring Cloud Gateway. Enforces CORS, rate limiting (10 req/s, hybrid key strategy), 10 KB request size limits, generates correlation trace IDs, and rejects requests missing proper idempotency headers. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/resources/application.yml) |
+| **[wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core)** | `8081` | Core Domain Service. Manages wallets, executes synchronous transfers using double distributed lock ordering, sanitizes inputs post-validation, enforces idempotency, and publishes transaction events to Kafka. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/resources/application.yml) |
+| **[audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker)** | `8082` | Compliance Audit Consumer. Consumes events asynchronously from Kafka, validates with strict Jackson deserialization, stores logs in JSONB format, and handles dead-letter recoveries. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/resources/application.yml) |
 
 ---
 
@@ -150,7 +151,7 @@ To avoid IEEE 754 floating-point rounding errors, all financial balances are sto
 * The presentation layer is responsible for scaling this value back on the UI.
 * See [Wallet.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/model/Wallet.java) and [Transaction.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/model/Transaction.java).
 
-### 2. Double-Click Protection (Atomic Idempotency Engine)
+### 2. Double-Click Protection & Sanitization
 Every mutating API request (Deposit, Transfer) requires an `Idempotency-Key` UUID header.
 * The [IdempotencyHeaderValidationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/IdempotencyHeaderValidationFilter.java) at the Gateway validates header formats.
 * In [wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core), the custom annotation `@Idempotent` is intercepted by [IdempotencyAspect](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/idempotency/IdempotencyAspect.java).
@@ -158,6 +159,7 @@ Every mutating API request (Deposit, Transfer) requires an `Idempotency-Key` UUI
 * If a concurrent request arrives before completion, it receives a `409 Conflict`.
 * Once completed, the final response payload is saved in Redis under `COMPLETED` status with a 24-hour TTL, allowing immediate replay returns.
 * If the underlying database transaction fails, the aspect catches the exception and calls `idempotencyService.fail(key)` to remove the Redis key, allowing the client to safely retry.
+* **Input Sanitization**: Implements [SanitizationAspect](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/idempotency/SanitizationAspect.java) which runs post-validation on all controller endpoints to trim string parameters and HTML-escape special characters (via Spring's `HtmlUtils`), preventing XSS and injection attacks.
 
 ### 3. Distributed Concurrency & Deadlock Prevention (Decoupled Locking)
 In traditional peer-to-peer transfers, locking both the sender and receiver wallets concurrently can lead to complex cyclical deadlocks (e.g., if User A pays User B while User B concurrently pays User A).
@@ -172,8 +174,6 @@ In traditional peer-to-peer transfers, locking both the sender and receiver wall
 This project intentionally avoids heavy service discovery systems like Netflix Eureka. Instead, services utilize Docker's built-in DNS service discovery (`http://flash-wallet-core:8081` and `http://flash-audit-worker:8082`), drastically reducing JVM memory footprint.
 
 ### 5. Event-Driven Audit Ledger & DLT Recovery
-* Transactions are streamed to Apache Kafka under topic `wallet.transaction.events`.
-* The partition key is set to the transaction UUID to guarantee order sequence preservation for individual transactions.
 * The [audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker) service processes events. To prevent double-entry duplicate events during network retries, it relies on a PostgreSQL unique constraint on `(kafka_partition, kafka_offset)`. Duplicates are caught and gracefully ignored.
 * For corrupted payloads or transient failures, the [AuditDeadLetterRecoverer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/java/com/services/auditworker/service/AuditDeadLetterRecoverer.java) publishes the message to `wallet.transaction.events.DLT` along with failure headers, and records the failure inside the database table `audit_processing_failures` for manual reconciliation.
 
@@ -199,6 +199,15 @@ In-progress states like "currently crediting" or "currently compensating" are **
 | `COMPLETED` | Terminal success — both debit and credit committed | `executeCreditTx()` / `executeDepositTx()` |
 | `COMPENSATED` | Terminal rollback — sender refunded cleanly | `executeCompensationTx()` |
 | `FAILED` | Terminal error — compensation exhausted; manual intervention required | `SagaDltRecoverer` |
+
+### 8. Perimeter Security (Rate & Size Limiting)
+* Implemented Redis-backed rate limiting using Spring Cloud Gateway's `RequestRateLimiter`.
+* **Hybrid KeyResolver**: The [RateLimiterConfig](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/config/RateLimiterConfig.java) rate limits strictly by remote client IP address on auth paths, and checks client identifier headers (`X-Client-Id` / `X-Client`) with an IP fallback for other business endpoints.
+* **Payload Size Constraints**: Limits request body size to **10 KB** at the gateway level using a `RequestSize` filter to defend against large-payload memory exhaustion vectors.
+
+### 9. Strict Deserialization Boundaries
+* Jackson ObjectMappers globally configured with `DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES` to immediately reject malformed requests with unrecognized fields.
+* Polymorphic deserialization is blocked by restricting Jackson's default typing configurations in [JacksonSecurityConfig.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/config/JacksonSecurityConfig.java) to prevent remote code execution vulnerabilities.
 
 ---
 
@@ -378,7 +387,6 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
     "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
     "balance": 0,
     "currency": "INR",
-    "version": 0,
     "updatedAt": "2026-05-24T08:00:00Z"
   }
   ```
@@ -405,7 +413,6 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
     "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
     "balance": 50000,
     "currency": "INR",
-    "version": 1,
     "updatedAt": "2026-05-24T08:05:00Z"
   }
   ```
@@ -469,7 +476,6 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
     "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
     "balance": 35000,
     "currency": "INR",
-    "version": 2,
     "updatedAt": "2026-05-24T08:10:00Z"
   }
   ```

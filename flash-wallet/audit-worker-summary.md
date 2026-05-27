@@ -109,13 +109,14 @@ Below is an exhaustive breakdown of every file within the `audit-worker` service
 ## 2. Configuration Layer (`config/`)
 - **`AuditKafkaConfiguration.java`**: The core Kafka setup file. It configures the Kafka topics (`transactionEventsTopic` and `transactionEventsDeadLetterTopic`), consumer/producer factories, and a `ConcurrentKafkaListenerContainerFactory`. Crucially, it sets up a `DefaultErrorHandler` with an exponential backoff strategy (retries messages before giving up) and links it to the `AuditDeadLetterRecoverer` for handling retry exhaustion. It ensures that validation or deserialization errors are *not* retried, as they are unrecoverable.
 - **`AuditWorkerProperties.java`**: A configuration properties class binding to the `audit.worker` prefix in `application.yml`. It defines default Kafka topics, concurrency limits, and retry logic parameters (max retries, intervals, multipliers).
+- **`JacksonSecurityConfig.java`**: Explicitly configures the global Spring Boot `ObjectMapper` to fail on unknown properties and disable default typing configurations to prevent polymorphic deserialization attacks.
 - **`AuditWorkerStartupLogger.java`**: An event listener that triggers when the application is ready (`ApplicationReadyEvent`). It logs the active Kafka and application configurations (topics, consumer groups, backoff parameters) to the console to verify successful startup configuration.
 
 ## 3. Consumer Layer (`consumer/`)
 - **`AuditEventListener.java`**: The primary Kafka consumer. It uses `@KafkaListener` to poll messages from the main audit topic. Upon receiving a message, it logs the event details (topic, partition, offset) and hands the raw `ConsumerRecord` over to the `AuditEventProcessingService` for business logic processing.
 
 ## 4. Data Transfer Objects (`dto/`)
-- **`TransactionEventMessage.java`**: Represents the JSON structure of the incoming Kafka messages. It models financial events containing fields like `transactionId`, `idempotencyKey`, `amount`, `senderWalletId`, `receiverWalletId`, `status`, `eventType`, and `timestamp`.
+- **`TransactionEventMessage.java`**: A Java `record` representing the JSON structure of the incoming Kafka messages. It models financial events containing fields like `transactionId`, `idempotencyKey`, `amount`, `currency`, `senderWalletId`, `receiverWalletId`, `status`, `eventType`, and `timestamp`. It enforces validation annotations such as `@NotNull` and `@Positive`.
 
 ## 5. Entity Layer (`entity/`)
 - **`AuditLog.java`**: JPA Entity mapping to the `audit_logs` table. It stores validated transaction payloads as JSONB in PostgreSQL. It defines a unique constraint on the Kafka partition and offset to prevent duplicate processing (idempotency), and indexes the `transactionId` for fast lookups.
