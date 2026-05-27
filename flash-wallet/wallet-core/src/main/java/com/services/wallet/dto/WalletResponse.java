@@ -25,9 +25,6 @@ public record WalletResponse(
     @Size(min = 3, max = 3, message = "Currency code must be exactly 3 characters")
     String currency,
 
-    @NotNull(message = "Version is required")
-    Integer version,
-
     @NotNull(message = "Updated at timestamp is required")
     Instant updatedAt
 ) {}

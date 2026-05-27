@@ -4,6 +4,9 @@ server:
 spring:
   application:
     name: wallet-core
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
 
   # Database Configuration
   datasource:

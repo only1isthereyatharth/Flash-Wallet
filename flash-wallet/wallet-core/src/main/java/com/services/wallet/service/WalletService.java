@@ -234,7 +234,6 @@ public class WalletService {
                 .userId(wallet.getUserId())
                 .balance(wallet.getBalance())
                 .currency(wallet.getCurrency())
-                .version(wallet.getVersion())
                 .updatedAt(wallet.getUpdatedAt())
                 .build();
     }

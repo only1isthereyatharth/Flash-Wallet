@@ -16,6 +16,8 @@ sequenceDiagram
     participant AccessLogFilter as AccessLogFilter
     participant IdempotencyFilter as IdempotencyHeaderValidationFilter
     participant RoutesConfig as GatewayRoutesConfiguration
+    participant RateLimiter as RequestRateLimiter (Redis)
+    participant SizeFilter as RequestSizeFilter (10 KB)
     participant WalletCore as Downstream (Wallet Core)
     
     Client->>CorrelationFilter: 1. Sends HTTP Request
@@ -30,7 +32,7 @@ sequenceDiagram
     deactivate AccessLogFilter
     
     activate IdempotencyFilter
-    alt Method is POST/PUT/PATCH/DELETE
+    alt Method is POST/PUT/PATCH/DELETE on protected path
         IdempotencyFilter->>IdempotencyFilter: 6. Validates Idempotency-Key UUID format
         note right of IdempotencyFilter: Rejects with 400 Bad Request if missing/invalid
     end
@@ -39,16 +41,30 @@ sequenceDiagram
     
     activate RoutesConfig
     RoutesConfig->>RoutesConfig: 8. Matches path to defined routes (e.g. /api/v1/wallets/**)
-    RoutesConfig->>WalletCore: 9. Proxies request to Downstream Service
-    deactivate RoutesConfig
+    RoutesConfig->>RateLimiter: 9. Check rate limit (hybrid KeyResolver: IP/X-Client-Id)
+    activate RateLimiter
+    alt Rate limit exceeded
+        RateLimiter-->>Client: 9a. 429 Too Many Requests
+    else Within quota
+        RateLimiter->>SizeFilter: 9b. Forwards allowed request
+    end
+    deactivate RateLimiter
+    
+    activate SizeFilter
+    alt Body exceeds 10 KB
+        SizeFilter-->>Client: 10a. 413 Payload Too Large
+    else Body within limit
+        SizeFilter->>WalletCore: 10b. Proxies request to Downstream Service
+    end
+    deactivate SizeFilter
     
     activate WalletCore
-    WalletCore-->>AccessLogFilter: 10. Returns HTTP Response
+    WalletCore-->>AccessLogFilter: 11. Returns HTTP Response
     deactivate WalletCore
     
     activate AccessLogFilter
-    AccessLogFilter->>AccessLogFilter: 11. Calculates duration & logs response status
-    AccessLogFilter-->>Client: 12. Returns response with X-Request-Id header
+    AccessLogFilter->>AccessLogFilter: 12. Calculates duration & logs response status
+    AccessLogFilter-->>Client: 13. Returns response with X-Request-Id header
     deactivate AccessLogFilter
 ```
 
@@ -62,7 +78,8 @@ Below is an exhaustive breakdown of every file within the `api-gateway` service 
 ## 2. Configuration Layer (`config/`)
 - **`ApiGatewayProperties.java`**: Strongly-typed configuration class matching the `flash.gateway` prefix in `application.yml`. Holds properties for routing URIs, HTTP client timeouts, CORS rules, logging thresholds, and paths requiring strict idempotency.
 - **`GatewayCorsConfiguration.java`**: Configures Cross-Origin Resource Sharing (CORS) using a `CorsWebFilter`. It applies the allowed origins, methods, and exposed headers (like `X-Request-Id`) globally based on the configuration properties.
-- **`GatewayRoutesConfiguration.java`**: The core routing engine setup. Uses `RouteLocatorBuilder` to map specific path patterns (e.g., `/api/v1/wallets/**`, `/swagger-ui/**`) directly to the `wallet-core` downstream URI.
+- **`GatewayRoutesConfiguration.java`**: The core routing engine setup. Uses `RouteLocatorBuilder` to map specific path patterns (e.g., `/api/v1/wallets/**`, `/swagger-ui/**`) directly to the `wallet-core` downstream URI. It applies request size limits (10 KB) and Redis-backed rate limiting filters to downstream routes.
+- **`RateLimiterConfig.java`**: Configures Redis-backed rate limiting. Defines a hybrid `KeyResolver` that enforces strict IP-based rate limiting on authentication endpoints (`/api/v1/auth/**`), and checks `X-Client-Id` or `X-Client` headers (with IP fallback) for all other wallet core requests.
 - **`GatewayStartupLogger.java`**: An event listener that logs the configured properties and registered routes to the console as soon as the application is fully started, aiding in deployment verification.
 
 ## 3. Filter Layer (`filter/`)

@@ -107,8 +107,11 @@ services:
       - "8080:8080"
     environment:
       - WALLET_CORE_URI=http://wallet-core:8081
+      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_DATA_REDIS_PORT=6379
     depends_on:
       - wallet-core
+      - redis
     networks:
       - flash-network
 

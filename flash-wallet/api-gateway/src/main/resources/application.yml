@@ -4,6 +4,9 @@ server:
 spring:
   application:
     name: api-gateway
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
   cloud:
     gateway:
       httpclient:

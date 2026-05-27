@@ -4,6 +4,9 @@ server:
 spring:
   application:
     name: audit-worker
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
 
   datasource:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/audit_worker_db
