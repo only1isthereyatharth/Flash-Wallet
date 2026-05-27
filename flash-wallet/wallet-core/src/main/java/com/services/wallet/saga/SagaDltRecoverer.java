@@ -153,23 +153,23 @@ public class SagaDltRecoverer implements ConsumerRecordRecoverer {
             }
             TransactionEvent event = objectMapper.readValue(
                     record.value().toString(), TransactionEvent.class);
-            Optional<Transaction> optTx = transactionRepository.findById(event.getTransactionId());
+            Optional<Transaction> optTx = transactionRepository.findById(event.transactionId());
             if (optTx.isEmpty()) {
                 log.error("CRITICAL — Transaction not found for DLT event, manual reconciliation required: transactionId={}",
-                        event.getTransactionId());
+                        event.transactionId());
                 return;
             }
             Transaction tx = optTx.get();
             if (tx.getStatus() == TransactionStatus.COMPENSATED
                 || tx.getStatus() == TransactionStatus.COMPLETED) {
                 log.info("Transaction already in terminal state {}, skipping FAILED mark: transactionId={}",
-                        tx.getStatus(), event.getTransactionId());
+                        tx.getStatus(), event.transactionId());
                 return;
             }
             tx.setStatus(TransactionStatus.FAILED);
             transactionRepository.save(tx);
             log.error("CRITICAL — Transaction marked FAILED, manual reconciliation required: transactionId={}",
-                    event.getTransactionId());
+                    event.transactionId());
         } catch (Exception ex) {
             log.error("Failed to mark transaction as FAILED after DLT routing. " +
                     "DLT record exists for manual recovery. record.key={}", record.key(), ex);

@@ -87,41 +87,41 @@ public class TransferSagaConsumer {
 
                 TransactionEvent event = deserialize(record);
 
-                if (!EVENT_DEBIT_COMPLETED.equals(event.getEventType())) {
+                if (!EVENT_DEBIT_COMPLETED.equals(event.eventType())) {
                         log.info(
                                         "Saga consumer ignoring unsupported eventType={} for transactionId={}",
-                                        event.getEventType(), event.getTransactionId());
+                                        event.eventType(), event.transactionId());
                         return;
                 }
 
                 log.info(
                                 "Processing TRANSFER_DEBIT_COMPLETED: transactionId={}, senderWalletId={}, receiverWalletId={}, amount={}",
-                                event.getTransactionId(), event.getSenderWalletId(),
-                                event.getReceiverWalletId(), event.getAmount());
+                                event.transactionId(), event.senderWalletId(),
+                                event.receiverWalletId(), event.amount());
 
                 // Guard: check for duplicate delivery before acquiring any lock
-                Transaction transaction = transactionRepository.findById(event.getTransactionId())
+                Transaction transaction = transactionRepository.findById(event.transactionId())
                                 .orElseThrow(() -> {
                                         log.error("Saga Step 2 aborted: Transaction record not found for id={}",
-                                                        event.getTransactionId());
+                                                        event.transactionId());
                                         // Throwing here triggers Kafka retry → DLT after exhaustion
                                         return new IllegalStateException(
                                                         "Transaction record not found for saga event: "
-                                                                        + event.getTransactionId());
+                                                                        + event.transactionId());
                                 });
 
                 if (transaction.getStatus() != TransactionStatus.DEBIT_COMPLETED) {
                         log.info(
                                         "Saga event is a duplicate delivery — already processed. " +
                                                         "transactionId={}, currentStatus={}, skipping.",
-                                        event.getTransactionId(), transaction.getStatus());
+                                        event.transactionId(), transaction.getStatus());
                         return;
                 }
 
                 // Execute credit under receiver wallet lock
                 try {
                         lockManager.executeWithLock(
-                                        event.getReceiverWalletId(),
+                                        event.receiverWalletId(),
                                         5000, // 5s max wait — matches Step 1 lock timeout
                                         10000, // 10s lease guard
                                         () -> {
@@ -132,10 +132,10 @@ public class TransferSagaConsumer {
                         // Credit failed — initiate compensation under sender wallet lock
                         log.error(
                                         "Saga Step 2 (credit) failed for transactionId={}. Initiating compensation.",
-                                        event.getTransactionId(), creditException);
+                                        event.transactionId(), creditException);
                         try {
                                 lockManager.executeWithLock(
-                                                event.getSenderWalletId(),
+                                                event.senderWalletId(),
                                                 5000,
                                                 10000,
                                                 () -> {
@@ -147,11 +147,11 @@ public class TransferSagaConsumer {
                                                 "Saga compensation also failed for transactionId={}. " +
                                                                 "Event will be retried by Kafka and may end in DLT. " +
                                                                 "MANUAL INTERVENTION MAY BE REQUIRED.",
-                                                event.getTransactionId(), compensationException);
+                                                event.transactionId(), compensationException);
                                 // Re-throw so Kafka retry/DLT takes over
                                 throw new SagaCompensationException(
                                                 "Saga compensation failed for transactionId: "
-                                                                + event.getTransactionId(),
+                                                                + event.transactionId(),
                                                 compensationException);
                         }
                 }
@@ -163,20 +163,20 @@ public class TransferSagaConsumer {
          */
         @Transactional
         public void executeCreditTx(TransactionEvent event, Transaction transaction) {
-                Wallet receiver = walletRepository.findById(event.getReceiverWalletId())
+                Wallet receiver = walletRepository.findById(event.receiverWalletId())
                                 .orElseThrow(() -> new WalletNotFoundException(
                                                 "Receiver wallet not found during saga credit: "
-                                                                + event.getReceiverWalletId()));
+                                                                + event.receiverWalletId()));
 
                 // Validate currency consistency — guards against wallet being recreated with a
                 // different currency
-                if (!receiver.getCurrency().equalsIgnoreCase(event.getCurrency())) {
+                if (!receiver.getCurrency().equalsIgnoreCase(event.currency())) {
                         throw new IllegalStateException(String.format(
                                         "Currency mismatch in saga credit step: expected=%s, receiverWalletCurrency=%s, transactionId=%s",
-                                        event.getCurrency(), receiver.getCurrency(), event.getTransactionId()));
+                                        event.currency(), receiver.getCurrency(), event.transactionId()));
                 }
 
-                receiver.setBalance(receiver.getBalance() + event.getAmount());
+                receiver.setBalance(receiver.getBalance() + event.amount());
                 walletRepository.save(receiver);
 
                 transaction.setStatus(TransactionStatus.COMPLETED);
@@ -185,12 +185,12 @@ public class TransferSagaConsumer {
                 // Publish terminal success event to the shared topic (consumed by audit-worker
                 // and any future services)
                 TransactionEvent completedEvent = TransactionEvent.builder()
-                                .transactionId(event.getTransactionId())
-                                .idempotencyKey(event.getIdempotencyKey())
-                                .senderWalletId(event.getSenderWalletId())
-                                .receiverWalletId(event.getReceiverWalletId())
-                                .amount(event.getAmount())
-                                .currency(event.getCurrency())
+                                .transactionId(event.transactionId())
+                                .idempotencyKey(event.idempotencyKey())
+                                .senderWalletId(event.senderWalletId())
+                                .receiverWalletId(event.receiverWalletId())
+                                .amount(event.amount())
+                                .currency(event.currency())
                                 .status(TransactionStatus.COMPLETED.name())
                                 .eventType("TRANSFER_COMPLETED")
                                 .timestamp(Instant.now())
@@ -199,7 +199,7 @@ public class TransferSagaConsumer {
 
                 log.info(
                                 "Saga Step 2 (credit) committed: transactionId={}, receiverWalletId={}, amount={}",
-                                event.getTransactionId(), event.getReceiverWalletId(), event.getAmount());
+                                event.transactionId(), event.receiverWalletId(), event.amount());
         }
 
         /**
@@ -215,25 +215,25 @@ public class TransferSagaConsumer {
         @Transactional
         public void executeCompensationTx(TransactionEvent event, Transaction transaction) {
                 // Reload transaction inside the new tx to get the freshest status
-                Transaction freshTx = transactionRepository.findById(event.getTransactionId())
+                Transaction freshTx = transactionRepository.findById(event.transactionId())
                                 .orElseThrow(() -> new IllegalStateException(
                                                 "Transaction not found during saga compensation: "
-                                                                + event.getTransactionId()));
+                                                                + event.transactionId()));
 
                 if (freshTx.getStatus() == TransactionStatus.COMPENSATED
                     || freshTx.getStatus() == TransactionStatus.FAILED) {
                         log.info(
                                         "Compensation already applied (idempotent skip): transactionId={}, status={}",
-                                        event.getTransactionId(), freshTx.getStatus());
+                                        event.transactionId(), freshTx.getStatus());
                         return;
                 }
 
-                Wallet sender = walletRepository.findById(event.getSenderWalletId())
+                Wallet sender = walletRepository.findById(event.senderWalletId())
                                 .orElseThrow(() -> new WalletNotFoundException(
                                                 "Sender wallet not found during saga compensation: "
-                                                                + event.getSenderWalletId()));
+                                                                + event.senderWalletId()));
 
-                sender.setBalance(sender.getBalance() + event.getAmount());
+                sender.setBalance(sender.getBalance() + event.amount());
                 walletRepository.save(sender);
 
                 freshTx.setStatus(TransactionStatus.COMPENSATED);
@@ -242,12 +242,12 @@ public class TransferSagaConsumer {
                 // Publish terminal rollback event — audit-worker will record this, ops can alert
                 // on it
                 TransactionEvent compensatedEvent = TransactionEvent.builder()
-                                .transactionId(event.getTransactionId())
-                                .idempotencyKey(event.getIdempotencyKey())
-                                .senderWalletId(event.getSenderWalletId())
-                                .receiverWalletId(event.getReceiverWalletId())
-                                .amount(event.getAmount())
-                                .currency(event.getCurrency())
+                                .transactionId(event.transactionId())
+                                .idempotencyKey(event.idempotencyKey())
+                                .senderWalletId(event.senderWalletId())
+                                .receiverWalletId(event.receiverWalletId())
+                                .amount(event.amount())
+                                .currency(event.currency())
                                 .status(TransactionStatus.COMPENSATED.name())
                                 .eventType("TRANSFER_SAGA_FAILED")
                                 .timestamp(Instant.now())
@@ -256,7 +256,7 @@ public class TransferSagaConsumer {
 
                 log.warn(
                                 "Saga compensation committed: transactionId={}, sender re-credited amount={}. Transfer has been COMPENSATED.",
-                                event.getTransactionId(), event.getAmount());
+                                event.transactionId(), event.amount());
         }
 
         // ─── Private helpers ──────────────────────────────────────────────────────
