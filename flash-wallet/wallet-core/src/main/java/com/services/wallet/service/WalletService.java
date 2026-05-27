@@ -4,6 +4,7 @@ import com.services.wallet.dto.DepositRequest;
 import com.services.wallet.dto.TransferRequest;
 import com.services.wallet.dto.TransferResponse;
 import com.services.wallet.dto.WalletResponse;
+import com.services.wallet.config.KafkaConfig;
 import com.services.wallet.event.TransactionEvent;
 import com.services.wallet.exception.InsufficientBalanceException;
 import com.services.wallet.exception.WalletNotFoundException;
@@ -18,11 +19,13 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.UUID;
+
 
 @Service
 @RequiredArgsConstructor
@@ -33,6 +36,7 @@ public class WalletService {
     private final TransactionRepository transactionRepository;
     private final LockManager lockManager;
     private final WalletEventProducer eventProducer;
+    private final KafkaTemplate<String, TransactionEvent> kafkaTemplate;
 
     @Autowired
     @Lazy
@@ -46,10 +50,10 @@ public class WalletService {
         log.info("Initiating P2P transfer from wallet {} to wallet {} of amount {}", 
                 request.senderWalletId(), request.receiverWalletId(), request.amount());
         try {
-            // Lock ordering happens internally in lockManager
-            return lockManager.executeWithDoubleLocks(
+            // Step 1 only requires locking the sender's wallet.
+            // Receiver is locked during Step 2 in TransferSagaConsumer.
+            return lockManager.executeWithLock(
                     request.senderWalletId(),
-                    request.receiverWalletId(),
                     5000, // 5 seconds max wait to acquire locks
                     10000, // 10 seconds auto-lease guard
                     () -> self.executeTransferTx(request, idempotencyKey)
@@ -83,7 +87,21 @@ public class WalletService {
     }
 
     /**
-     * Transactional block for P2P transfers.
+     * Saga Step 1: validates the transfer request, debits the sender, and
+     * records the transaction as {@code DEBIT_COMPLETED}.
+     *
+     * <p>A write-ahead record with status {@code INITIATED} is persisted before
+     * any balance mutation. If the debit succeeds, the status is atomically
+     * updated to {@code DEBIT_COMPLETED} in the same {@code @Transactional} commit.
+     *
+     * <p>This method publishes a {@code TRANSFER_DEBIT_COMPLETED} event to
+     * {@code wallet.saga.events}. The {@link com.services.wallet.saga.TransferSagaConsumer}
+     * picks this up and performs Step 2 (receiver credit) or the compensating
+     * transaction (sender re-credit) if the credit fails.
+     *
+     * <p>The response status is {@code "DEBIT_COMPLETED"} — the transfer is not yet complete.
+     * Callers should poll {@code GET /api/v1/wallets/transactions/{transactionId}}
+     * to determine the final outcome.
      */
     @Transactional
     public TransferResponse executeTransferTx(TransferRequest request, String idempotencyKey) {
@@ -106,48 +124,51 @@ public class WalletService {
             throw new InsufficientBalanceException("Insufficient balance in wallet: " + sender.getId());
         }
 
-        // Deduct and credit
-        sender.setBalance(sender.getBalance() - request.amount());
-        receiver.setBalance(receiver.getBalance() + request.amount());
-
-        // Save (Hibernate version triggers JPA optimistic locking fallback checks)
-        walletRepository.save(sender);
-        walletRepository.save(receiver);
-
-        // Record transaction
+        // 1. Persist write-ahead Transaction with status INITIATED
         Transaction transaction = Transaction.builder()
                 .id(UUID.randomUUID())
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
                 .amount(request.amount())
-                .status(TransactionStatus.SUCCESS)
+                .status(TransactionStatus.INITIATED)
                 .build();
         transactionRepository.save(transaction);
 
-        // Stream transaction event to Kafka
-        TransactionEvent event = TransactionEvent.builder()
+        // 2. Deduct from sender
+        sender.setBalance(sender.getBalance() - request.amount());
+        walletRepository.save(sender);
+
+        // 3. Update transaction to DEBIT_COMPLETED
+        transaction.setStatus(TransactionStatus.DEBIT_COMPLETED);
+        transactionRepository.save(transaction);
+
+        // ── Publish to saga coordination topic ───────────────────────────────
+        // The TransferSagaConsumer will pick this up and execute Step 2 (credit)
+        // or the compensating transaction (re-credit sender) if credit fails.
+        TransactionEvent sagaEvent = TransactionEvent.builder()
                 .transactionId(transaction.getId())
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
                 .amount(request.amount())
                 .currency(sender.getCurrency())
-                .status("SUCCESS")
-                .eventType("WALLET_TRANSFER_COMPLETED")
+                .status(TransactionStatus.DEBIT_COMPLETED.name())
+                .eventType("TRANSFER_DEBIT_COMPLETED")
                 .timestamp(Instant.now())
                 .build();
-        eventProducer.sendTransactionEvent(event);
+        kafkaTemplate.send(KafkaConfig.SAGA_EVENTS_TOPIC, transaction.getId().toString(), sagaEvent);
 
-        log.info("P2P transfer transaction committed successfully: ID={}", transaction.getId());
+        log.info("Saga Step 1 committed: transactionId={}, senderWalletId={}, amount={}, status=DEBIT_COMPLETED",
+                transaction.getId(), sender.getId(), request.amount());
 
         return TransferResponse.builder()
                 .transactionId(transaction.getId())
                 .senderWalletId(sender.getId())
                 .receiverWalletId(receiver.getId())
                 .amount(request.amount())
-                .status("SUCCESS")
-                .message("Transfer completed successfully")
+                .status("DEBIT_COMPLETED")
+                .message("Transfer initiated. Use the transactionId to poll for the final status.")
                 .build();
     }
 
@@ -163,18 +184,23 @@ public class WalletService {
             throw new IllegalArgumentException("Currency mismatch for deposit: expected " + wallet.getCurrency());
         }
 
-        wallet.setBalance(wallet.getBalance() + request.amount());
-        walletRepository.save(wallet);
-
-        // Record transaction
+        // ── Record transaction as INITIATED (write-ahead) ────────────────────
         Transaction transaction = Transaction.builder()
                 .id(UUID.randomUUID())
                 .idempotencyKey(idempotencyKey)
                 .senderWalletId(null) // null represents external ledger system deposit
                 .receiverWalletId(wallet.getId())
                 .amount(request.amount())
-                .status(TransactionStatus.SUCCESS)
+                .status(TransactionStatus.INITIATED)
                 .build();
+        transactionRepository.save(transaction);
+
+        // Update balance
+        wallet.setBalance(wallet.getBalance() + request.amount());
+        walletRepository.save(wallet);
+
+        // ── Update transaction to COMPLETED ──────────────────────────────────
+        transaction.setStatus(TransactionStatus.COMPLETED);
         transactionRepository.save(transaction);
 
         // Stream transaction event to Kafka
@@ -185,7 +211,7 @@ public class WalletService {
                 .receiverWalletId(wallet.getId())
                 .amount(request.amount())
                 .currency(wallet.getCurrency())
-                .status("SUCCESS")
+                .status(TransactionStatus.COMPLETED.name())
                 .eventType("WALLET_DEPOSIT_COMPLETED")
                 .timestamp(Instant.now())
                 .build();

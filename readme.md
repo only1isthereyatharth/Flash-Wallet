@@ -17,12 +17,15 @@ This architecture bypasses traditional, heavy enterprise patterns (like Eureka) 
             ┌────────────────┴────────────────┐
             ▼ (Internal Network Routing)      ▼
   [ flash-wallet-core ]             [ flash-audit-worker ]
-     │              │                          │
-     ▼ (SETNX)      ▼ (ACID Updates)           ▼ (Append-Only)
- [ Redis ]     [ Wallet Core DB ]        [ Audit DB ]
-     │                                         ▲
-     └─────────────► [ Kafka Topic ] ──────────┘
-                  (wallet.transaction.events)
+     │         │    ▲                          │
+     ▼ (SETNX) │    │ (Consume)                ▼ (Append-Only)
+ [ Redis ]     │    └───────┐             [ Audit DB ]
+     │         ▼            │                  ▲
+     │    [ Wallet Core DB ]│                  │
+     │                      │                  │
+     └─────────────► [ Kafka Topics ] ─────────┘
+                - wallet.saga.events (Saga)
+                - wallet.transaction.events (Audit)
 ```
 
 ### Core Flow Sequence Diagram
@@ -35,10 +38,12 @@ sequenceDiagram
     participant Redis as Redis Cache
     participant Core as flash-wallet-core
     participant DB as Postgres (Core DB)
-    participant Kafka as Kafka Broker
+    participant KafkaSaga as Kafka (wallet.saga.events)
+    participant KafkaAudit as Kafka (wallet.transaction.events)
     participant Worker as flash-audit-worker
     participant AuditDB as Postgres (Audit DB)
 
+    Note over Client,Gateway: Step 1: Synchronous Debit & Saga Initiation
     Client->>Gateway: POST /api/v1/wallets/transfer (Idempotency-Key, Payload)
     Note over Gateway: CorrelationIdFilter generates X-Request-Id<br/>IdempotencyHeaderValidationFilter verifies UUID<br/>RateLimiterFilter checks per-client quota<br/>RequestSizeFilter rejects payloads > 10 KB
     Gateway->>Core: Forwarded Request
@@ -59,31 +64,56 @@ sequenceDiagram
     end
 
     rect rgb(35, 25, 25)
-        Note over Core: LockManager sorts Wallet UUIDs alphabetically (deadlock prevention)
-        Core->>Redis: tryLock(lock:wallet:min(SENDER,RECEIVER))
-        Core->>Redis: tryLock(lock:wallet:max(SENDER,RECEIVER))
-        Note over Core: Both locks acquired. Start @Transactional block
-        Core->>DB: Load sender & receiver wallets, validate balance & currency
-        Core->>DB: Deduct sender balance, credit receiver balance
-        Core->>DB: Insert transaction record (status=SUCCESS)
-        Core->>Kafka: Publish wallet.transaction.events (transactionId, eventType=WALLET_TRANSFER_COMPLETED)
+        Note over Core: LockManager locks SENDER wallet
+        Core->>Redis: tryLock(lock:wallet:SENDER)
+        Note over Core: Sender lock acquired. Start @Transactional block
+        Core->>DB: Load sender wallet & validate balance/currency
+        Core->>DB: Insert transaction record (status=INITIATED)
+        Core->>DB: Debit sender balance
+        Core->>DB: Update transaction status to DEBIT_COMPLETED
+        Core->>KafkaSaga: Publish TRANSFER_DEBIT_COMPLETED event
         Core-->>DB: Commit Database Transaction
-        Core->>Redis: unlock(lock:wallet:max)
-        Core->>Redis: unlock(lock:wallet:min)
+        Core->>Redis: unlock(lock:wallet:SENDER)
     end
 
-    Core->>Redis: complete(idempotency:KEY, responseBody, 200 OK, TTL=24h)
-    Core-->>Gateway: HTTP 200 OK (Transfer Response)
-    Gateway-->>Client: HTTP 200 OK (with headers X-Request-Id)
+    Core->>Redis: complete(idempotency:KEY, responseBody, 202 Accepted, TTL=24h)
+    Core-->>Gateway: HTTP 202 Accepted (Status: DEBIT_COMPLETED)
+    Gateway-->>Client: HTTP 202 Accepted (with headers X-Request-Id)
 
-    opt Asynchronous Compliance Audit
-        Kafka->>Worker: Consume wallet.transaction.events
-        Worker->>Worker: Validate message properties & deserialize (strict Jackson)
+    Note over Client,Gateway: Step 2: Asynchronous Saga Execution (Credit / Compensate)
+    KafkaSaga->>Core: Consume TRANSFER_DEBIT_COMPLETED (TransferSagaConsumer)
+    
+    alt Happy Path: Credit Receiver
+        rect rgb(25, 35, 25)
+            Note over Core: LockManager locks RECEIVER wallet
+            Core->>Redis: tryLock(lock:wallet:RECEIVER)
+            Core->>DB: Load receiver wallet & validate currency
+            Core->>DB: Credit receiver balance
+            Core->>DB: Update transaction status to COMPLETED
+            Core->>KafkaAudit: Publish TRANSFER_COMPLETED event
+            Core-->>DB: Commit Transaction
+            Core->>Redis: unlock(lock:wallet:RECEIVER)
+        end
+    else Failure Path: Compensating Transaction (e.g., Receiver not found / Currency mismatch)
+        rect rgb(45, 25, 25)
+            Note over Core: LockManager locks SENDER wallet
+            Core->>Redis: tryLock(lock:wallet:SENDER)
+            Core->>DB: Re-credit sender balance (Refund)
+            Core->>DB: Update transaction status to COMPENSATED
+            Core->>KafkaAudit: Publish TRANSFER_SAGA_FAILED event
+            Core-->>DB: Commit Transaction
+            Core->>Redis: unlock(lock:wallet:SENDER)
+        end
+    end
+
+    opt Asynchronous Audit Logging
+        KafkaAudit->>Worker: Consume events (TRANSFER_COMPLETED / TRANSFER_SAGA_FAILED)
+        Worker->>Worker: Validate message properties & deserialize
         alt Validation Success
             Worker->>AuditDB: Persist AuditLog (JSONB payload, partition, offset)
         else Validation fails / Database error
-            Note over Worker: Retries exhausted (exponential backoff)
-            Worker->>Kafka: Publish to wallet.transaction.events.DLT
+            Note over Worker: Retries exhausted
+            Worker->>KafkaAudit: Publish to wallet.transaction.events.DLT
             Worker->>AuditDB: Log failure in audit_processing_failures
         end
     end
@@ -131,28 +161,51 @@ Every mutating API request (Deposit, Transfer) requires an `Idempotency-Key` UUI
 * If the underlying database transaction fails, the aspect catches the exception and calls `idempotencyService.fail(key)` to remove the Redis key, allowing the client to safely retry.
 * **Input Sanitization**: Implements [SanitizationAspect](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/idempotency/SanitizationAspect.java) which runs post-validation on all controller endpoints to trim string parameters and HTML-escape special characters (via Spring's `HtmlUtils`), preventing XSS and injection attacks.
 
-### 3. Distributed Deadlock Prevention (Lock Ordering)
-In peer-to-peer transfers, locks must be held for both the sender and receiver wallets. If User A pays User B while User B concurrently pays User A, this can lead to cyclical deadlocks.
-* To prevent this, [LockManager.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/lock/LockManager.java) enforces **Lock Ordering**.
-* The resource lock keys are strictly acquired in alphabetical order based on their UUID string values (`walletIdA.toString().compareTo(walletIdB.toString())`).
-* This eliminates cyclical wait graphs, transforming concurrent operations into linear execution queues.
-* Locks are acquired *outside* the JPA transaction boundary to prevent database connection starvation.
+### 3. Distributed Concurrency & Deadlock Prevention (Decoupled Locking)
+In traditional peer-to-peer transfers, locking both the sender and receiver wallets concurrently can lead to complex cyclical deadlocks (e.g., if User A pays User B while User B concurrently pays User A).
+* With the **Choreography-based Saga pattern**, we naturally eliminate cyclical deadlocks by decoupling lock acquisitions across time and steps.
+* **Step 1 (Debit)**: Only the sender's wallet is locked. The lock is released immediately after Step 1 commits.
+* **Step 2 (Credit)**: Only the receiver's wallet is locked when the saga consumer applies the credit.
+* **Step 3 (Compensation)**: Only the sender's wallet is locked during the refund process.
+* Since only a single wallet lock is held per execution context, cyclical deadlock graphs are physically impossible.
+* All locks are acquired and released outside of JPA transaction boundaries via [LockManager.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/lock/LockManager.java) using Redis to prevent database connection starvation.
 
 ### 4. Container-Native Service Discovery
 This project intentionally avoids heavy service discovery systems like Netflix Eureka. Instead, services utilize Docker's built-in DNS service discovery (`http://flash-wallet-core:8081` and `http://flash-audit-worker:8082`), drastically reducing JVM memory footprint.
 
 ### 5. Event-Driven Audit Ledger & DLT Recovery
-* Transactions are streamed to Apache Kafka under topic `wallet.transaction.events`.
-* The partition key is set to the transaction UUID to guarantee order sequence preservation for individual transactions.
 * The [audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker) service processes events. To prevent double-entry duplicate events during network retries, it relies on a PostgreSQL unique constraint on `(kafka_partition, kafka_offset)`. Duplicates are caught and gracefully ignored.
 * For corrupted payloads or transient failures, the [AuditDeadLetterRecoverer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/java/com/services/auditworker/service/AuditDeadLetterRecoverer.java) publishes the message to `wallet.transaction.events.DLT` along with failure headers, and records the failure inside the database table `audit_processing_failures` for manual reconciliation.
 
-### 6. Perimeter Security (Rate & Size Limiting)
+### 6. Choreography-Based Saga Pattern (Distributed Transactions)
+To support high-throughput concurrent transaction processing while maintaining ledger consistency, P2P transfers are implemented as a **Choreography-based Saga** via Kafka.
+* **Step 1 (Debit)**: A write-ahead transaction record is created with `INITIATED` status. The sender's wallet is debited, the transaction status is atomically updated to `DEBIT_COMPLETED`, and a `TRANSFER_DEBIT_COMPLETED` event is published to the `wallet.saga.events` topic — all within a single `@Transactional` commit. The API immediately returns a `202 Accepted` response.
+* **Step 2 (Credit)**: The [TransferSagaConsumer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/saga/TransferSagaConsumer.java) consumes the event from `wallet.saga.events`. It locks the receiver's wallet, credits the balance, marks the transaction status as `COMPLETED`, and streams a `TRANSFER_COMPLETED` event to the `wallet.transaction.events` topic for audit.
+* **Compensating Transaction (Refund)**: If Step 2 fails (e.g., due to receiver wallet not found, currency mismatch, or database issues), the consumer initiates a compensating transaction. It locks the sender's wallet, refunds the debited amount, updates the transaction status to `COMPENSATED`, and streams a `TRANSFER_SAGA_FAILED` event to `wallet.transaction.events` for compliance auditing.
+* **DLT Exhaustion (`FAILED`)**: If the compensating transaction itself fails after all Kafka retries (exponential backoff, up to 3 attempts), the event is routed to the Dead-Letter Topic (`wallet.saga.events.DLT`). The [SagaDltRecoverer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/saga/SagaDltRecoverer.java) marks the transaction as `FAILED` — a catastrophic terminal state indicating money is debited but not returned. This requires immediate manual intervention.
+
+### 7. Write-Ahead Log Pattern (Safe Transaction Status Persistence)
+Transaction statuses are designed so that **only safe-to-retry states** are persisted to the database. A state is safe to persist if and only if:
+1. It is written **atomically with the balance change** in the same `@Transactional` block.
+2. Any retry that sees it can make a safe, unambiguous decision.
+3. A background reconciliation job can understand it without ambiguity.
+
+In-progress states like "currently crediting" or "currently compensating" are **never persisted**, because a crash during these operations would leave the transaction stuck in an unrecoverable state. Instead, the saga consumer uses the `DEBIT_COMPLETED` status as its idempotency guard — if the status is anything other than `DEBIT_COMPLETED`, the event is a duplicate and is skipped.
+
+| Status | Meaning | Who Sets It |
+|---|---|---|
+| `INITIATED` | Record exists, no money moved yet (write-ahead) | `executeTransferTx()` / `executeDepositTx()` |
+| `DEBIT_COMPLETED` | Sender debited; awaiting receiver credit or compensation | `executeTransferTx()` |
+| `COMPLETED` | Terminal success — both debit and credit committed | `executeCreditTx()` / `executeDepositTx()` |
+| `COMPENSATED` | Terminal rollback — sender refunded cleanly | `executeCompensationTx()` |
+| `FAILED` | Terminal error — compensation exhausted; manual intervention required | `SagaDltRecoverer` |
+
+### 8. Perimeter Security (Rate & Size Limiting)
 * Implemented Redis-backed rate limiting using Spring Cloud Gateway's `RequestRateLimiter`.
 * **Hybrid KeyResolver**: The [RateLimiterConfig](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/config/RateLimiterConfig.java) rate limits strictly by remote client IP address on auth paths, and checks client identifier headers (`X-Client-Id` / `X-Client`) with an IP fallback for other business endpoints.
 * **Payload Size Constraints**: Limits request body size to **10 KB** at the gateway level using a `RequestSize` filter to defend against large-payload memory exhaustion vectors.
 
-### 7. Strict Deserialization Boundaries
+### 9. Strict Deserialization Boundaries
 * Jackson ObjectMappers globally configured with `DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES` to immediately reject malformed requests with unrecognized fields.
 * Polymorphic deserialization is blocked by restricting Jackson's default typing configurations in [JacksonSecurityConfig.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/config/JacksonSecurityConfig.java) to prevent remote code execution vulnerabilities.
 
@@ -182,7 +235,7 @@ CREATE TABLE transactions (
     sender_wallet_id UUID REFERENCES wallets(id),
     receiver_wallet_id UUID REFERENCES wallets(id),
     amount BIGINT NOT NULL,
-    status VARCHAR(20) NOT NULL, -- SUCCESS, FAILED
+    status VARCHAR(20) NOT NULL, -- INITIATED, DEBIT_COMPLETED, COMPLETED, COMPENSATED, FAILED
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -379,21 +432,42 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
     "currency": "INR"
   }
   ```
-* **Response Payload (`200 OK`):**
+* **Response Payload (`202 Accepted`):**
   ```json
   {
     "transactionId": "b6a3b2cb-20c2-4876-b633-5c8e2bd06a74",
     "senderWalletId": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
     "receiverWalletId": "a1811e5c-7d9a-4c28-98e3-5a0d3f82b7db",
     "amount": 15000,
-    "status": "SUCCESS",
-    "message": "Transfer completed successfully"
+    "status": "DEBIT_COMPLETED",
+    "message": "Transfer initiated. Use the transactionId to poll for the final status."
   }
   ```
 
 ---
 
-### 4. Fetch Wallet Details
+### 4. Poll Transaction Status
+* **Endpoint:** `GET /api/v1/wallets/transactions/{transactionId}`
+* **Description:** Polls the current status of an initiated P2P transfer transaction.
+* **Response Payload (`200 OK`):**
+  ```json
+  {
+    "transactionId": "b6a3b2cb-20c2-4876-b633-5c8e2bd06a74",
+    "status": "COMPLETED",
+    "idempotencyKey": "f2d58bf5-4089-4b68-b80c-7b1981bdeebf"
+  }
+  ```
+  | Status | Meaning |
+  |---|---|
+  | `INITIATED` | Transaction record created, no money moved yet |
+  | `DEBIT_COMPLETED` | Sender debited, awaiting receiver credit (in-flight saga) |
+  | `COMPLETED` | Terminal success — both debit and credit committed |
+  | `COMPENSATED` | Terminal rollback — sender refunded cleanly |
+  | `FAILED` | Terminal error — compensation exhausted, manual intervention required |
+
+---
+
+### 5. Fetch Wallet Details
 * **Endpoint:** `GET /api/v1/wallets/{walletId}`
 * **Response Payload (`200 OK`):**
   ```json
@@ -408,7 +482,7 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
 
 ---
 
-### 5. Fetch Wallet by User ID
+### 6. Fetch Wallet by User ID
 * **Endpoint:** `GET /api/v1/wallets/user/{userId}`
 * **Response Payload (`200 OK`):**
   Same schema format as the general fetch endpoint.
@@ -457,9 +531,15 @@ curl -X POST http://localhost:8080/api/v1/wallets/transfer \
   -H "Idempotency-Key: f2d58bf5-4089-4b68-b80c-7b1981bdeebf" \
   -d '{"senderWalletId": "<UUID_A>", "receiverWalletId": "<UUID_B>", "amount": 40000, "currency": "INR"}'
 ```
-* **Expected Result:** HTTP `200 OK` with status `SUCCESS`. Balance in Wallet A drops to `60000`, and Wallet B receives `40000`.
+* **Expected Result:** HTTP `202 Accepted` with status `DEBIT_COMPLETED` and a `transactionId`. Balance in Wallet A drops to `60000`, but Wallet B is not yet credited.
 
-### 5. Verify Asynchronous Compliance Logging
+### 5. Poll Transaction Status
+```bash
+curl http://localhost:8080/api/v1/wallets/transactions/<transactionId>
+```
+* **Expected Result:** HTTP `200 OK` with status `COMPLETED`. Verify that Wallet B is now credited with `40000`.
+
+### 6. Verify Asynchronous Compliance Logging
 Query the `audit_worker_db` to check if Kafka successfully streamed and processed the event:
 ```bash
 docker exec -it postgres-db psql -U postgres -d audit_worker_db -c "SELECT * FROM audit_logs;"

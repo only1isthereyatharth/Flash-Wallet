@@ -2,6 +2,7 @@ package com.services.wallet.controller;
 
 import com.services.wallet.dto.*;
 import com.services.wallet.idempotency.Idempotent;
+import com.services.wallet.repository.TransactionRepository;
 import com.services.wallet.service.WalletService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -11,6 +12,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Map;
 import java.util.UUID;
 
 @RestController
@@ -20,6 +22,7 @@ import java.util.UUID;
 public class WalletController {
 
     private final WalletService walletService;
+    private final TransactionRepository transactionRepository;
 
     @PostMapping
     public ResponseEntity<WalletResponse> createWallet(@RequestBody @Valid CreateWalletRequest request) {
@@ -28,6 +31,14 @@ public class WalletController {
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
+    /**
+     * Initiates a P2P transfer via the Saga pattern.
+     *
+     * <p>Returns {@code 202 Accepted} immediately after the sender is debited
+     * and the saga event is published. The receiver credit happens asynchronously.
+     * Poll {@code GET /api/v1/wallets/transactions/{transactionId}} with the returned
+     * {@code transactionId} to determine the final outcome ({@code PENDING → SUCCESS | FAILED}).
+     */
     @PostMapping("/transfer")
     @Idempotent
     public ResponseEntity<TransferResponse> transfer(
@@ -36,7 +47,7 @@ public class WalletController {
         String idempotencyKey = httpServletRequest.getHeader("Idempotency-Key");
         log.info("REST: Idempotent transfer request with key: {}", idempotencyKey);
         TransferResponse response = walletService.transfer(request, idempotencyKey);
-        return ResponseEntity.ok(response);
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
     }
 
     @PostMapping("/deposit")
@@ -62,5 +73,27 @@ public class WalletController {
         log.info("REST: Fetching wallet details for user ID: {}", userId);
         WalletResponse response = walletService.getWalletByUserId(userId);
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Polls the current status of a transfer transaction.
+     *
+     * <p>Use the {@code transactionId} returned by {@code POST /transfer} to check
+     * whether the Saga completed ({@code SUCCESS}), failed ({@code FAILED}),
+     * or is still in-flight ({@code PENDING}).
+     *
+     * @param transactionId the UUID returned by the transfer endpoint
+     * @return 200 with status payload, or 404 if the transaction does not exist
+     */
+    @GetMapping("/transactions/{transactionId}")
+    public ResponseEntity<Map<String, String>> getTransactionStatus(
+            @PathVariable UUID transactionId) {
+        log.info("REST: Polling status for transactionId: {}", transactionId);
+        return transactionRepository.findById(transactionId)
+                .map(tx -> ResponseEntity.ok(Map.of(
+                        "transactionId", tx.getId().toString(),
+                        "status", tx.getStatus().name(),
+                        "idempotencyKey", tx.getIdempotencyKey())))
+                .orElse(ResponseEntity.notFound().build());
     }
 }

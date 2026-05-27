@@ -1,7 +1,9 @@
 package com.services.wallet.model;
 
 public enum TransactionStatus {
-    PENDING,
-    SUCCESS,
+    INITIATED,
+    DEBIT_COMPLETED,
+    COMPLETED,
+    COMPENSATED,
     FAILED
 }
