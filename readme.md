@@ -123,7 +123,7 @@ sequenceDiagram
 
 ## 🛠️ Tech Stack & Infrastructure
 
-* **Backend Engine:** Java 21 / Spring Boot 3.2.5
+* **Backend Engine:** Java 21 / Spring Boot 4.0.6
 * **Message Broker:** Apache Kafka (Event-driven asynchronous audit engine)
 * **Distributed Cache & Locking:** Redis (Redisson client for distributed locks and idempotency storage)
 * **Primary Relational Databases:** PostgreSQL (Isolated databases following Database-per-Service pattern)
@@ -206,8 +206,8 @@ In-progress states like "currently crediting" or "currently compensating" are **
 * **Payload Size Constraints**: Limits request body size to **10 KB** at the gateway level using a `RequestSize` filter to defend against large-payload memory exhaustion vectors.
 
 ### 9. Strict Deserialization Boundaries
-* Jackson ObjectMappers globally configured with `DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES` to immediately reject malformed requests with unrecognized fields.
-* Polymorphic deserialization is blocked by restricting Jackson's default typing configurations in [JacksonSecurityConfig.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/config/JacksonSecurityConfig.java) to prevent remote code execution vulnerabilities.
+* Jackson ObjectMappers are globally configured by Spring Boot 4.x with `DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES` enabled by default, immediately rejecting malformed requests with unrecognized fields.
+* Polymorphic deserialization risks are minimized through Spring Boot's autoconfiguration defaults and standard Jackson type-safety patterns, preventing remote code execution vulnerabilities.
 
 ---
 
