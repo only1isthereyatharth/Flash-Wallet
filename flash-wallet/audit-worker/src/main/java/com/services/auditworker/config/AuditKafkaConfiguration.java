@@ -5,7 +5,7 @@ import com.services.auditworker.exception.AuditEventValidationException;
 import com.services.auditworker.service.AuditDeadLetterRecoverer;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.admin.NewTopic;
-import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
@@ -63,7 +63,8 @@ public class AuditKafkaConfiguration {
             AuditWorkerProperties properties) {
         AuditWorkerProperties.Retry retryProperties = properties.getRetry();
 
-        ExponentialBackOffWithMaxRetries backOff = new ExponentialBackOffWithMaxRetries(retryProperties.getMaxRetries());
+        ExponentialBackOffWithMaxRetries backOff = new ExponentialBackOffWithMaxRetries(
+                retryProperties.getMaxRetries());
         backOff.setInitialInterval(retryProperties.getInitialIntervalMs());
         backOff.setMultiplier(retryProperties.getMultiplier());
         backOff.setMaxInterval(retryProperties.getMaxIntervalMs());
@@ -76,8 +77,8 @@ public class AuditKafkaConfiguration {
         errorHandler.setRetryListeners(new RetryListener() {
             @Override
             public void failedDelivery(org.apache.kafka.clients.consumer.ConsumerRecord<?, ?> record,
-                                       Exception ex,
-                                       int deliveryAttempt) {
+                    Exception ex,
+                    int deliveryAttempt) {
                 log.warn(
                         "Kafka retry attempt scheduled for audit event: attempt={}, topic={}, partition={}, offset={}, key={}, exceptionType={}, message={}",
                         deliveryAttempt,
@@ -91,8 +92,8 @@ public class AuditKafkaConfiguration {
 
             @Override
             public void recoveryFailed(org.apache.kafka.clients.consumer.ConsumerRecord<?, ?> record,
-                                       Exception original,
-                                       Exception failure) {
+                    Exception original,
+                    Exception failure) {
                 log.error(
                         "Kafka recovery failed for audit event: topic={}, partition={}, offset={}, key={}, originalExceptionType={}, recoveryExceptionType={}",
                         record.topic(),
@@ -112,8 +113,7 @@ public class AuditKafkaConfiguration {
             ConsumerFactory<String, String> auditConsumerFactory,
             DefaultErrorHandler auditErrorHandler,
             AuditWorkerProperties properties) {
-        ConcurrentKafkaListenerContainerFactory<String, String> factory =
-                new ConcurrentKafkaListenerContainerFactory<>();
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(auditConsumerFactory);
         factory.setCommonErrorHandler(auditErrorHandler);
         factory.setConcurrency(properties.getListenerConcurrency());

@@ -2,7 +2,7 @@ package com.services.wallet.saga;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
@@ -21,11 +21,16 @@ import java.util.Map;
 /**
  * Kafka listener infrastructure for the Transfer Saga consumer.
  *
- * <p>Uses a dedicated consumer group ({@code wallet-core-saga-group}) and a separate
- * {@link ConcurrentKafkaListenerContainerFactory} so it does not interfere with any
+ * <p>
+ * Uses a dedicated consumer group ({@code wallet-core-saga-group}) and a
+ * separate
+ * {@link ConcurrentKafkaListenerContainerFactory} so it does not interfere with
+ * any
  * other Kafka configuration in {@code wallet-core}.
  *
- * <p>Retry policy mirrors the audit-worker approach: exponential back-off followed by
+ * <p>
+ * Retry policy mirrors the audit-worker approach: exponential back-off followed
+ * by
  * DLT routing via {@link SagaDltRecoverer} once all retries are exhausted.
  */
 @Configuration
@@ -50,7 +55,8 @@ public class SagaKafkaConfig {
 
     /**
      * Producer factory for the Saga DLT publisher.
-     * Uses String serialization because saga events are raw JSON strings on the wire.
+     * Uses String serialization because saga events are raw JSON strings on the
+     * wire.
      */
     @Bean
     public ProducerFactory<String, String> sagaProducerFactory(KafkaProperties kafkaProperties) {
@@ -63,7 +69,8 @@ public class SagaKafkaConfig {
     /**
      * String-typed KafkaTemplate used exclusively by {@link SagaDltRecoverer}.
      * Named explicitly so it does not conflict with the auto-configured
-     * {@code KafkaTemplate<String, TransactionEvent>} used by {@code WalletEventProducer}.
+     * {@code KafkaTemplate<String, TransactionEvent>} used by
+     * {@code WalletEventProducer}.
      */
     @Bean
     public KafkaTemplate<String, String> sagaStringKafkaTemplate(
@@ -82,8 +89,7 @@ public class SagaKafkaConfig {
 
         SagaProperties.Retry retry = sagaProperties.getRetry();
 
-        ExponentialBackOffWithMaxRetries backOff =
-                new ExponentialBackOffWithMaxRetries(retry.getMaxRetries());
+        ExponentialBackOffWithMaxRetries backOff = new ExponentialBackOffWithMaxRetries(retry.getMaxRetries());
         backOff.setInitialInterval(retry.getInitialIntervalMs());
         backOff.setMultiplier(retry.getMultiplier());
         backOff.setMaxInterval(retry.getMaxIntervalMs());
@@ -123,7 +129,8 @@ public class SagaKafkaConfig {
 
     /**
      * Listener container factory used by {@link TransferSagaConsumer}.
-     * {@code AckMode.RECORD} ensures offset is committed only after successful processing.
+     * {@code AckMode.RECORD} ensures offset is committed only after successful
+     * processing.
      */
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, String> sagaKafkaListenerContainerFactory(
@@ -131,8 +138,7 @@ public class SagaKafkaConfig {
             DefaultErrorHandler sagaErrorHandler,
             SagaProperties sagaProperties) {
 
-        ConcurrentKafkaListenerContainerFactory<String, String> factory =
-                new ConcurrentKafkaListenerContainerFactory<>();
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(sagaConsumerFactory);
         factory.setCommonErrorHandler(sagaErrorHandler);
         factory.setConcurrency(sagaProperties.getListenerConcurrency());
