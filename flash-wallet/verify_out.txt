@@ -1,0 +1,79 @@
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Build Order:
+[INFO] 
+[INFO]                                                                    [pom]
+[INFO] api-gateway                                                        [jar]
+[INFO] wallet-core                                                        [jar]
+[INFO] audit-worker                                                       [jar]
+[INFO] 
+[INFO] ---------------------< com.services:flash-wallet >----------------------
+[INFO] Building  0.0.1-SNAPSHOT                                           [1/4]
+[INFO]   from pom.xml
+[INFO] --------------------------------[ pom ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.5.0:clean (default-clean) @ flash-wallet ---
+[INFO] 
+[INFO] --- spring-boot:4.0.6:repackage (repackage) @ flash-wallet ---
+[INFO] 
+[INFO] ----------------------< com.services:api-gateway >----------------------
+[INFO] Building api-gateway 1.0-SNAPSHOT                                  [2/4]
+[INFO]   from api-gateway\pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.5.0:clean (default-clean) @ api-gateway ---
+[INFO] Deleting C:\Users\2790645\Flash-Wallet\Flash-Wallet\flash-wallet\api-gateway\target
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ api-gateway ---
+[INFO] Copying 1 resource from src\main\resources to target\classes
+[INFO] Copying 0 resource from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.15.0:compile (default-compile) @ api-gateway ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 13 source files with javac [debug parameters release 21] to target\classes
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ api-gateway ---
+[INFO] skip non existing resourceDirectory C:\Users\2790645\Flash-Wallet\Flash-Wallet\flash-wallet\api-gateway\src\test\resources
+[INFO] 
+[INFO] --- compiler:3.15.0:testCompile (default-testCompile) @ api-gateway ---
+[INFO] Recompiling the module because of changed dependency.
+[INFO] Compiling 1 source file with javac [debug parameters release 21] to target\test-classes
+[INFO] 
+[INFO] --- surefire:3.5.5:test (default-test) @ api-gateway ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.services.apigateway.ApiGatewayIntegrationTest
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::                (v4.0.6)
+
+2026-05-29T22:35:26.633+05:30  INFO 22220 --- [api-gateway] [           main] c.s.a.ApiGatewayIntegrationTest          : Starting ApiGatewayIntegrationTest using Java 21.0.10 with PID 22220 (started by 2790645 in C:\Users\2790645\Flash-Wallet\Flash-Wallet\flash-wallet\api-gateway)
+2026-05-29T22:35:26.644+05:30  INFO 22220 --- [api-gateway] [           main] c.s.a.ApiGatewayIntegrationTest          : No active profile set, falling back to 1 default profile: "default"
+2026-05-29T22:35:30.295+05:30  INFO 22220 --- [api-gateway] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
+2026-05-29T22:35:30.301+05:30  INFO 22220 --- [api-gateway] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.
+2026-05-29T22:35:30.390+05:30  INFO 22220 --- [api-gateway] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 42 ms. Found 0 Redis repository interfaces.
+2026-05-29T22:35:31.260+05:30  INFO 22220 --- [api-gateway] [           main] o.s.cloud.context.scope.GenericScope     : BeanFactory id=5909210c-d5b5-33a1-9f62-df8e75c07713
+2026-05-29T22:35:34.647+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [After]
+2026-05-29T22:35:34.647+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Before]
+2026-05-29T22:35:34.647+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Between]
+2026-05-29T22:35:34.647+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Cookie]
+2026-05-29T22:35:34.647+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Header]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Host]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Method]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Path]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Query]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [ReadBody]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [RemoteAddr]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Version]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [XForwardedRemoteAddr]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [Weight]
+2026-05-29T22:35:34.655+05:30  INFO 22220 --- [api-gateway] [           main] o.s.c.g.r.RouteDefinitionRouteLocator    : Loaded RoutePredicateFactory [CloudFoundryRouteService]

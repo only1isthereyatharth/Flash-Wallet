@@ -1,0 +1,93 @@
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Build Order:
+[INFO] 
+[INFO]                                                                    [pom]
+[INFO] api-gateway                                                        [jar]
+[INFO] wallet-core                                                        [jar]
+[INFO] audit-worker                                                       [jar]
+[INFO] 
+[INFO] ---------------------< com.services:flash-wallet >----------------------
+[INFO] Building  0.0.1-SNAPSHOT                                           [1/4]
+[INFO]   from pom.xml
+[INFO] --------------------------------[ pom ]---------------------------------
+[INFO] 
+[INFO] --- dependency:3.9.0:list (default-cli) @ flash-wallet ---
+[INFO] 
+[INFO] The following files have been resolved:
+[INFO]    org.springframework.boot:spring-boot-starter-classic:jar:4.0.6:compile -- module spring.boot.starter.classic [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-test-classic:jar:4.0.6:test -- module spring.boot.starter.test.classic [auto]
+[INFO] 
+[INFO] 
+[INFO] ----------------------< com.services:api-gateway >----------------------
+[INFO] Building api-gateway 1.0-SNAPSHOT                                  [2/4]
+[INFO]   from api-gateway\pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- dependency:3.9.0:list (default-cli) @ api-gateway ---
+[INFO] 
+[INFO] The following files have been resolved:
+[INFO]    org.springframework.cloud:spring-cloud-starter-gateway-server-webflux:jar:5.0.1:compile -- module spring.cloud.starter.gateway.server.webflux (auto)
+[INFO]    org.springframework.boot:spring-boot-starter-data-redis-reactive:jar:4.0.6:compile -- module spring.boot.starter.data.redis.reactive [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-validation:jar:4.0.6:compile -- module spring.boot.starter.validation [auto]
+[INFO]    org.projectlombok:lombok:jar:1.18.46:provided -- module lombok
+[INFO]    org.springframework.boot:spring-boot-jackson2:jar:4.0.6:compile -- module spring.boot.jackson2 [auto]
+[INFO]    org.springframework.boot:spring-boot-webtestclient:jar:4.0.6:test -- module spring.boot.webtestclient [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-classic:jar:4.0.6:compile -- module spring.boot.starter.classic [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-test-classic:jar:4.0.6:test -- module spring.boot.starter.test.classic [auto]
+[INFO] 
+[INFO] 
+[INFO] ----------------------< com.services:wallet-core >----------------------
+[INFO] Building wallet-core 1.0-SNAPSHOT                                  [3/4]
+[INFO]   from wallet-core\pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- dependency:3.9.0:list (default-cli) @ wallet-core ---
+[INFO] 
+[INFO] The following files have been resolved:
+[INFO]    org.springframework.boot:spring-boot-starter-webmvc:jar:4.0.6:compile -- module spring.boot.starter.webmvc [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-data-jpa:jar:4.0.6:compile -- module spring.boot.starter.data.jpa [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-validation:jar:4.0.6:compile -- module spring.boot.starter.validation [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-aspectj:jar:4.0.6:compile -- module spring.boot.starter.aspectj [auto]
+[INFO]    org.postgresql:postgresql:jar:42.7.10:runtime -- module org.postgresql.jdbc [auto]
+[INFO]    org.redisson:redisson-spring-boot-starter:jar:4.4.0:compile -- module redisson.spring.boot.starter [auto]
+[INFO]    org.springframework.kafka:spring-kafka:jar:4.0.5:compile -- module spring.kafka [auto]
+[INFO]    org.springdoc:springdoc-openapi-starter-webmvc-ui:jar:3.0.3:compile -- module org.springdoc.openapi.ui [auto]
+[INFO]    org.springframework.boot:spring-boot-jackson2:jar:4.0.6:compile -- module spring.boot.jackson2 [auto]
+[INFO]    org.projectlombok:lombok:jar:1.18.46:provided -- module lombok
+[INFO]    org.springframework.boot:spring-boot-starter-classic:jar:4.0.6:compile -- module spring.boot.starter.classic [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-test-classic:jar:4.0.6:test -- module spring.boot.starter.test.classic [auto]
+[INFO] 
+[INFO] 
+[INFO] ---------------------< com.services:audit-worker >----------------------
+[INFO] Building audit-worker 1.0-SNAPSHOT                                 [4/4]
+[INFO]   from audit-worker\pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- dependency:3.9.0:list (default-cli) @ audit-worker ---
+[INFO] 
+[INFO] The following files have been resolved:
+[INFO]    org.springframework.boot:spring-boot-starter:jar:4.0.6:compile -- module spring.boot.starter [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-data-jpa:jar:4.0.6:compile -- module spring.boot.starter.data.jpa [auto]
+[INFO]    org.springframework.boot:spring-boot-jackson2:jar:4.0.6:compile -- module spring.boot.jackson2 [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-validation:jar:4.0.6:compile -- module spring.boot.starter.validation [auto]
+[INFO]    org.springframework.kafka:spring-kafka:jar:4.0.5:compile -- module spring.kafka [auto]
+[INFO]    org.postgresql:postgresql:jar:42.7.10:runtime -- module org.postgresql.jdbc [auto]
+[INFO]    org.projectlombok:lombok:jar:1.18.46:provided -- module lombok
+[INFO]    org.springframework.kafka:spring-kafka-test:jar:4.0.5:test -- module spring.kafka.test [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-classic:jar:4.0.6:compile -- module spring.boot.starter.classic [auto]
+[INFO]    org.springframework.boot:spring-boot-starter-test-classic:jar:4.0.6:test -- module spring.boot.starter.test.classic [auto]
+[INFO] 
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary:
+[INFO] 
+[INFO]  0.0.1-SNAPSHOT .................................... SUCCESS [  6.117 s]
+[INFO] api-gateway 1.0-SNAPSHOT ........................... SUCCESS [  2.110 s]
+[INFO] wallet-core 1.0-SNAPSHOT ........................... SUCCESS [  2.063 s]
+[INFO] audit-worker 1.0-SNAPSHOT .......................... SUCCESS [  1.026 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  12.930 s
+[INFO] Finished at: 2026-05-29T22:22:58+05:30
+[INFO] ------------------------------------------------------------------------
