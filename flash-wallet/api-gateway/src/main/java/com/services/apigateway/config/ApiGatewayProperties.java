@@ -20,6 +20,9 @@ public class ApiGatewayProperties {
     private Cors cors = new Cors();
     private Logging logging = new Logging();
     private Idempotency idempotency = new Idempotency();
+    private RateLimit rateLimit = new RateLimit();
+    private Resilience resilience = new Resilience();
+    private Security security = new Security();
 
     @Data
     public static class Services {
@@ -43,7 +46,7 @@ public class ApiGatewayProperties {
         @NotEmpty
         private List<String> allowedMethods = new ArrayList<>(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         @NotEmpty
-        private List<String> allowedHeaders = new ArrayList<>(List.of("*"));
+        private List<String> allowedHeaders = new ArrayList<>(List.of("Content-Type", "Idempotency-Key", "X-Request-Id", "X-Client-Id", "X-Client", "Authorization"));
         @NotEmpty
         private List<String> exposedHeaders = new ArrayList<>(List.of("X-Request-Id"));
     }
@@ -62,8 +65,36 @@ public class ApiGatewayProperties {
     @Data
     public static class Idempotency {
         private boolean strictUuid = true;
+        private int maxHeaderLength = 128;
         private List<String> requiredPaths = new ArrayList<>(List.of(
                 "/api/v1/wallets/transfer",
                 "/api/v1/wallets/deposit"));
+    }
+
+    @Data
+    public static class RateLimit {
+        @Min(1)
+        private int replenishRate = 10;
+
+        @Min(1)
+        private int burstCapacity = 20;
+
+        @Min(1)
+        private int requestedTokens = 1;
+    }
+
+    @Data
+    public static class Resilience {
+        private CircuitBreaker circuitBreaker = new CircuitBreaker();
+
+        @Data
+        public static class CircuitBreaker {
+            private boolean enabled = true;
+        }
+    }
+
+    @Data
+    public static class Security {
+        private boolean hstsEnabled = false;
     }
 }

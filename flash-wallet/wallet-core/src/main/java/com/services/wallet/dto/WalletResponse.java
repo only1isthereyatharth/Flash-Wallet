@@ -3,7 +3,6 @@ package com.services.wallet.dto;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.PositiveOrZero;
-import jakarta.validation.constraints.Size;
 import lombok.Builder;
 
 import java.time.Instant;
@@ -22,7 +21,7 @@ public record WalletResponse(
     Long balance,
 
     @NotBlank(message = "Currency is required")
-    @Size(min = 3, max = 3, message = "Currency code must be exactly 3 characters")
+    @CurrencyCode
     String currency,
 
     @NotNull(message = "Updated at timestamp is required")

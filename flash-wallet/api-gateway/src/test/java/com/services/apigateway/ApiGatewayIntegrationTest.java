@@ -14,7 +14,10 @@ import org.springframework.test.web.reactive.server.WebTestClient;
         properties = {
                 "flash.gateway.services.wallet-core-uri=http://localhost:65535",
                 "flash.gateway.http-client.connect-timeout-ms=200",
-                "flash.gateway.http-client.response-timeout-ms=500"
+                "flash.gateway.http-client.response-timeout-ms=500",
+                "flash.gateway.resilience.circuit-breaker.enabled=false",
+                "management.health.redis.enabled=false",
+                "management.health.redisRateLimitStore.enabled=false"
         })
 @AutoConfigureWebTestClient
 class ApiGatewayIntegrationTest {
