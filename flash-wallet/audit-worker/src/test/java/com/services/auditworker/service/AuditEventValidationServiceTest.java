@@ -74,4 +74,35 @@ class AuditEventValidationServiceTest {
 
         assertThrows(AuditEventValidationException.class, () -> validationService.validate(event));
     }
+
+    @Test
+    void shouldAcceptValidSagaFailedEvent() {
+        TransactionEventMessage event = TransactionEventMessage.builder()
+                .transactionId(UUID.randomUUID())
+                .senderWalletId(UUID.randomUUID())
+                .receiverWalletId(UUID.randomUUID())
+                .amount(7500L)
+                .currency("INR")
+                .status("COMPENSATED")
+                .eventType("WALLET_TRANSFER_SAGA_FAILED")
+                .timestamp(Instant.now())
+                .build();
+
+        assertDoesNotThrow(() -> validationService.validate(event));
+    }
+
+    @Test
+    void shouldRejectSagaFailedWithoutSenderWallet() {
+        TransactionEventMessage event = TransactionEventMessage.builder()
+                .transactionId(UUID.randomUUID())
+                .receiverWalletId(UUID.randomUUID())
+                .amount(7500L)
+                .currency("INR")
+                .status("COMPENSATED")
+                .eventType("WALLET_TRANSFER_SAGA_FAILED")
+                .timestamp(Instant.now())
+                .build();
+
+        assertThrows(AuditEventValidationException.class, () -> validationService.validate(event));
+    }
 }

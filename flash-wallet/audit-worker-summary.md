@@ -90,9 +90,9 @@ Below is an exhaustive breakdown of every file within the `audit-worker` service
 
 - **`AuditEventValidationService.java`**: Stateless validator that inspects `TransactionEventMessage` fields and enforces business rules:
   - Verifies `transactionId` is a valid UUID.
-  - Verifies `eventType` is one of `WALLET_TRANSFER_COMPLETED`, `WALLET_DEPOSIT_COMPLETED`, `WALLET_TRANSFER_FAILED`.
+  - Verifies `eventType` is one of `WALLET_TRANSFER_COMPLETED`, `WALLET_TRANSFER_SAGA_FAILED`, or `WALLET_DEPOSIT_COMPLETED` (any other value throws `AuditEventValidationException`).
   - Verifies `amount` is positive.
-  - For transfer events, asserts both `senderWalletId` and `receiverWalletId` are non-null.
+  - For transfer events (`WALLET_TRANSFER_COMPLETED`, `WALLET_TRANSFER_SAGA_FAILED`), asserts both `senderWalletId` and `receiverWalletId` are non-null.
   - For deposit events, asserts only `receiverWalletId` is non-null.
 
 - **`AuditPersistenceService.java`**: Persists validated events to the database:
@@ -109,8 +109,8 @@ Below is an exhaustive breakdown of every file within the `audit-worker` service
   - `receiverWalletId` (UUID)
   - `amount` (long, in lowest denomination)
   - `currency` (3-char ISO code)
-  - `status` (enum: SUCCESS / FAILED)
-  - `eventType` (enum: WALLET_TRANSFER_COMPLETED, WALLET_DEPOSIT_COMPLETED, WALLET_TRANSFER_FAILED)
+  - `status` (String: `COMPLETED`, `DEBIT_COMPLETED`, `COMPENSATED`, `FAILED` — values from `TransactionStatus` enum)
+  - `eventType` (String: `WALLET_TRANSFER_COMPLETED`, `WALLET_TRANSFER_SAGA_FAILED`, `WALLET_DEPOSIT_COMPLETED`)
   - `timestamp` (Instant)
 
 ## 4. Entity & Repository Layer (`entity/`, `repository/`)

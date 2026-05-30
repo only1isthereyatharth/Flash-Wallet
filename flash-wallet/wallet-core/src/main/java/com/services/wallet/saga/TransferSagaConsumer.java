@@ -35,11 +35,11 @@ import java.time.Instant;
  * Step 2 (this consumer — happy path):
  *   – Receive TRANSFER_DEBIT_COMPLETED
  *   – Credit receiver, update Transaction(status=COMPLETED)
- *   – Publish TRANSFER_COMPLETED → wallet.transaction.events
+ *   – Publish WALLET_TRANSFER_COMPLETED → wallet.transaction.events
  *
  * Compensation (this consumer — failure path):
  *   – Re-credit sender, update Transaction(status=COMPENSATED)
- *   – Publish TRANSFER_SAGA_FAILED → wallet.transaction.events
+ *   – Publish WALLET_TRANSFER_SAGA_FAILED → wallet.transaction.events
  *
  * DLT exhaustion (compensation retries exhausted):
  *   – Transaction marked as FAILED — manual intervention required
@@ -64,6 +64,8 @@ import java.time.Instant;
 public class TransferSagaConsumer {
 
         private static final String EVENT_DEBIT_COMPLETED = "TRANSFER_DEBIT_COMPLETED";
+        private static final String EVENT_TRANSFER_COMPLETED = "WALLET_TRANSFER_COMPLETED";
+        private static final String EVENT_TRANSFER_SAGA_FAILED = "WALLET_TRANSFER_SAGA_FAILED";
 
         private final ObjectMapper objectMapper;
         private final WalletRepository walletRepository;
@@ -197,7 +199,7 @@ public class TransferSagaConsumer {
                                 .amount(event.amount())
                                 .currency(event.currency())
                                 .status(TransactionStatus.COMPLETED.name())
-                                .eventType("TRANSFER_COMPLETED")
+                                .eventType(EVENT_TRANSFER_COMPLETED)
                                 .timestamp(Instant.now())
                                 .build();
                 eventProducer.sendTransactionEvent(completedEvent);
@@ -254,7 +256,7 @@ public class TransferSagaConsumer {
                                 .amount(event.amount())
                                 .currency(event.currency())
                                 .status(TransactionStatus.COMPENSATED.name())
-                                .eventType("TRANSFER_SAGA_FAILED")
+                                .eventType(EVENT_TRANSFER_SAGA_FAILED)
                                 .timestamp(Instant.now())
                                 .build();
                 eventProducer.sendTransactionEvent(compensatedEvent);
