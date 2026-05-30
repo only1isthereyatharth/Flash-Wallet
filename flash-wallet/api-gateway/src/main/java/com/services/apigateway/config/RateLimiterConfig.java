@@ -1,5 +1,6 @@
 package com.services.apigateway.config;
 
+import lombok.RequiredArgsConstructor;
 import org.springframework.cloud.gateway.filter.ratelimit.KeyResolver;
 import org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter;
 import org.springframework.context.annotation.Bean;
@@ -8,7 +9,10 @@ import org.springframework.context.annotation.Primary;
 import reactor.core.publisher.Mono;
 
 @Configuration
+@RequiredArgsConstructor
 public class RateLimiterConfig {
+
+    private final ApiGatewayProperties properties;
 
     @Bean
     @Primary
@@ -42,7 +46,9 @@ public class RateLimiterConfig {
 
     @Bean
     public RedisRateLimiter redisRateLimiter() {
-        // Safe defaults: replenishRate = 10, burstCapacity = 20
-        return new RedisRateLimiter(10, 20);
+        return new RedisRateLimiter(
+                properties.getRateLimit().getReplenishRate(),
+                properties.getRateLimit().getBurstCapacity(),
+                properties.getRateLimit().getRequestedTokens());
     }
 }

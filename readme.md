@@ -45,7 +45,7 @@ sequenceDiagram
 
     Note over Client,Gateway: Step 1: Synchronous Debit & Saga Initiation
     Client->>Gateway: POST /api/v1/wallets/transfer (Idempotency-Key, Payload)
-    Note over Gateway: CorrelationIdFilter generates X-Request-Id<br/>IdempotencyHeaderValidationFilter verifies UUID<br/>RateLimiterFilter checks per-client quota<br/>RequestSizeFilter rejects payloads > 10 KB
+    Note over Gateway: CorrelationIdFilter generates X-Request-Id<br/>ContentTypeValidationFilter rejects non-JSON mutating requests (415)<br/>IdempotencyHeaderValidationFilter verifies UUID + 128-char length cap<br/>Method allowlist rejects TRACE/CONNECT/OPTIONS (404)<br/>RateLimiterFilter checks per-client quota (externalized config)<br/>RequestSizeFilter rejects payloads > 10 KB<br/>CircuitBreaker short-circuits if wallet-core is failing (503 fallback)<br/>Retry filter retries GET on 5xx (max 2, jittered backoff)<br/>SecurityHeadersFilter (WebFilter) injects nosniff/DENY/no-referrer/HSTS via beforeCommit()
     Gateway->>Core: Forwarded Request
     
     rect rgb(25, 25, 35)
@@ -136,7 +136,7 @@ The backend codebase is organized as a Maven multi-module project (defined in [p
 
 | Microservice | Port | Description | Configuration File |
 | :--- | :--- | :--- | :--- |
-| **[api-gateway](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway)** | `8080` | Perimeter API Gateway using Spring Cloud Gateway. Enforces CORS, rate limiting (10 req/s, hybrid key strategy), 10 KB request size limits, generates correlation trace IDs, and rejects requests missing proper idempotency headers. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/resources/application.yml) |
+| **[api-gateway](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway)** | `8080` | Perimeter API Gateway using Spring Cloud Gateway. Enforces CORS (explicit header allowlist), rate limiting (externalized config, hybrid key strategy), 10 KB request size limits, Content-Type validation (415 on non-JSON mutating requests), method allowlisting (rejects TRACE/CONNECT/OPTIONS), Idempotency-Key validation with 128-char length cap, security response headers via WebFilter `beforeCommit()` (nosniff, DENY, no-referrer, HSTS), Resilience4j circuit breaker with fallback, bounded retry (GET only), correlation trace IDs, actuator health probes (liveness + readiness gated on Redis), and Prometheus metrics. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/resources/application.yml) |
 | **[wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core)** | `8081` | Core Domain Service. Manages wallets, executes transfers via choreography-based saga, enforces payload-bound idempotency with SHA-256 hashing, validates ISO-4217 currency codes, and publishes transaction events to Kafka. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/resources/application.yml) |
 | **[audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker)** | `8082` | Compliance Audit Consumer. Consumes events asynchronously from Kafka, validates with strict Jackson deserialization, stores logs in JSONB format, and handles dead-letter recoveries. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/resources/application.yml) |
 
@@ -199,10 +199,21 @@ In-progress states like "currently crediting" or "currently compensating" are **
 | `COMPENSATED` | Terminal rollback — sender refunded cleanly | `executeCompensationTx()` |
 | `FAILED` | Terminal error — compensation exhausted; manual intervention required | `SagaDltRecoverer` |
 
-### 8. Perimeter Security (Rate & Size Limiting)
+### 8. Perimeter Security (Rate & Size Limiting, Security Headers)
 * Implemented Redis-backed rate limiting using Spring Cloud Gateway's `RequestRateLimiter`.
-* **Hybrid KeyResolver**: The [RateLimiterConfig](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/config/RateLimiterConfig.java) rate limits strictly by remote client IP address on auth paths, and checks client identifier headers (`X-Client-Id` / `X-Client`) with an IP fallback for other business endpoints.
+* **Hybrid KeyResolver**: The [RateLimiterConfig](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/config/RateLimiterConfig.java) rate limits strictly by remote client IP address on auth paths, and checks client identifier headers (`X-Client-Id` / `X-Client`) with an IP fallback for other business endpoints. Rate-limit values (`replenishRate`, `burstCapacity`, `requestedTokens`) are externalized to `flash.gateway.rate-limit.*` properties with sensible defaults.
 * **Payload Size Constraints**: Limits request body size to **10 KB** at the gateway level using a `RequestSize` filter to defend against large-payload memory exhaustion vectors.
+* **Method Allowlist**: Each route restricts HTTP methods to only those the API exposes (GET/POST/PUT/PATCH/DELETE for wallet routes, GET-only for swagger/api-docs). Disallowed methods (TRACE, CONNECT, OPTIONS outside CORS preflight) are rejected at the gateway — they never reach wallet-core.
+* **Content-Type Allowlist**: POST/PUT/PATCH requests without `Content-Type: application/json` are rejected at the gateway with 415, saving wallet-core a deserialization round-trip.
+* **Idempotency-Key Length Cap**: Even when `strictUuid=false`, header length is capped at 128 characters to prevent header-stuffing attacks.
+* **Tighter CORS**: `allowedHeaders` uses an explicit allowlist (`Content-Type`, `Idempotency-Key`, `X-Request-Id`, `X-Client-Id`, `X-Client`, `Authorization`) instead of `*`. `allowCredentials=false`.
+* **Security Response Headers**: A `WebFilter`-based `SecurityHeadersFilter` (using `beforeCommit()` at the WebFlux layer) injects `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on wallet paths), and `Strict-Transport-Security` (configurable, off in dev). Because it operates at the WebFlux layer, headers are applied to all responses including circuit-breaker fallbacks and error handler responses.
+
+### 9. Gateway Resilience (Circuit Breaker & Bounded Retry)
+* **Circuit Breaker**: The wallet-core route is protected by a Resilience4j circuit breaker. When downstream failures exceed the configured threshold (default 50% failure rate over a sliding window of 10 calls), the circuit opens and subsequent requests receive a 503 JSON response from the fallback endpoint immediately — protecting wallet-core from cascading load during outages. Configurable via `resilience4j.circuitbreaker.*` properties and feature-flagged via `flash.gateway.resilience.circuit-breaker.enabled`.
+* **Bounded Retry**: GET requests to wallet-core are automatically retried up to 2 times on 5xx or connection errors with jittered exponential backoff (100ms–1000ms, factor 2). Mutating verbs (POST/PUT/PATCH/DELETE) are **never** auto-retried — that is the client's responsibility under the idempotency-key contract.
+* **Actuator Health Probes**: Kubernetes-ready liveness and readiness probes at `/actuator/health/liveness` and `/actuator/health/readiness`. Readiness fails until Redis (rate-limit backing store) is reachable via a custom `RedisReadinessIndicator`.
+* **Prometheus Metrics**: Exposed at `/actuator/prometheus`. Spring Cloud Gateway's built-in `gateway.requests` Micrometer timer provides per-route latency, status code, and outcome dimensions. Only health, prometheus, and metrics endpoints are exposed — sensitive endpoints (`/env`, `/heapdump`) are not.
 
 ### 9. Strict Deserialization Boundaries
 * Jackson ObjectMappers are globally configured by Spring Boot 4.x with `DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES` enabled by default, immediately rejecting malformed requests with unrecognized fields.
@@ -622,6 +633,62 @@ mvn -pl wallet-core test
  - **New Files**: 4 (`IdempotencyPayloadMismatchException.java`, `CurrencyCode.java`, `CurrencyCodeValidator.java`, `TransactionStatusResponse.java`)
  - **Files Deleted**: 1 (`SanitizationAspect.java`)
  - **Maven Build**: ✅ SUCCESS (JDK 21)
+
+---
+
+## 🛡️ Phase 3: API Gateway Hardening (Branch: feature/gateway-hardening-phase3)
+
+Comprehensive hardening of the API Gateway to add resilience patterns, stricter security boundaries, observability, and production-readiness.
+
+### ✅ 3.1 Resilience: Circuit Breaker (Resilience4j)
+- **What**: Added Spring Cloud CircuitBreaker filter on the wallet-core route backed by Resilience4j. When downstream failures exceed the threshold, the circuit opens and requests are short-circuited to `/fallback/wallet-core` which returns 503 JSON via `GatewayErrorResponse`.
+- **Configuration**: Sliding window size, failure rate threshold, slow call duration, half-open window, and minimum calls — all externalized in `application.yml` under `resilience4j.circuitbreaker`. Feature-flagged via `flash.gateway.resilience.circuit-breaker.enabled` (default: true).
+- **Files Changed**: `pom.xml` (+`spring-cloud-starter-circuitbreaker-reactor-resilience4j`), `GatewayRoutesConfiguration.java`, `FallbackController.java` (NEW), `ApiGatewayProperties.java`, `application.yml`.
+
+### ✅ 3.2 Resilience: Bounded Retry on Idempotent Verbs Only
+- **What**: Added Retry filter to wallet-core route configured for GET only, max 2 retries on 5xx/connect errors with jittered exponential backoff (100ms–1000ms, factor 2). Mutating verbs (POST/PUT/PATCH/DELETE) are **never** auto-retried — that is the client's job under the idempotency-key contract.
+- **Files Changed**: `GatewayRoutesConfiguration.java`.
+
+### ✅ 3.3 Security Headers Response Filter
+- **What**: New `SecurityHeadersFilter` — a `WebFilter` (not `GlobalFilter`) at the Spring WebFlux layer using `beforeCommit()` to inject security headers on every response (including circuit-breaker fallbacks and error handler responses). Runs at `HIGHEST_PRECEDENCE + 1`. Headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on `/api/v1/wallets/**`), `Strict-Transport-Security` (configurable via `flash.gateway.security.hsts-enabled`, off in dev).
+- **Files Changed**: `SecurityHeadersFilter.java` (NEW), `ApiGatewayProperties.java` (Security inner class), `application.yml`.
+
+### ✅ 3.4 Method Allowlist Per Route
+- **What**: Each route restricts HTTP methods via route predicates (`.and().method(...)`). Wallet route allows GET/POST/PUT/PATCH/DELETE only. Swagger/API-docs routes allow GET only. Disallowed methods (TRACE, CONNECT, OPTIONS outside CORS preflight) produce 404 from the gateway — they never reach wallet-core.
+- **Files Changed**: `GatewayRoutesConfiguration.java`.
+
+### ✅ 3.5 Content-Type Allowlist on Mutating Routes
+- **What**: New `ContentTypeValidationFilter` rejects POST/PUT/PATCH requests without `Content-Type: application/json` at the gateway with 415 Unsupported Media Type. Saves wallet-core a deserialization round-trip and produces a uniform 415 from the gateway.
+- **Files Changed**: `ContentTypeValidationFilter.java` (NEW).
+
+### ✅ 3.6 Idempotency-Key Length Cap
+- **What**: Even when `strictUuid=false`, header length is capped at 128 characters to prevent header-stuffing attacks. Configurable via `flash.gateway.idempotency.max-header-length`.
+- **Files Changed**: `IdempotencyHeaderValidationFilter.java`, `ApiGatewayProperties.java`.
+
+### ✅ 3.7 Externalize Rate-Limit Numbers
+- **What**: Moved `replenishRate=10`, `burstCapacity=20`, `requestedTokens=1` from hardcoded `RateLimiterConfig.java` to `flash.gateway.rate-limit.*` properties with sensible defaults. New `RateLimit` inner class in `ApiGatewayProperties.java`.
+- **Files Changed**: `RateLimiterConfig.java`, `ApiGatewayProperties.java`, `application.yml`.
+
+### ✅ 3.8 Tighter CORS
+- **What**: Replaced `allowedHeaders: ["*"]` with explicit allowlist: `Content-Type`, `Idempotency-Key`, `X-Request-Id`, `X-Client-Id`, `X-Client`, `Authorization`. `allowCredentials=false` (unchanged).
+- **Files Changed**: `application.yml`, `ApiGatewayProperties.java`.
+
+### ✅ 3.9 Actuator: Liveness + Readiness
+- **What**: Added `spring-boot-starter-actuator`. Exposed `/actuator/health/liveness` and `/actuator/health/readiness` only (no `/env`, `/heapdump`). Readiness fails until Redis (rate-limit backing store) is reachable via custom `RedisReadinessIndicator`.
+- **Files Changed**: `pom.xml` (+`spring-boot-starter-actuator`), `application.yml`, `RedisReadinessIndicator.java` (NEW).
+
+### ✅ 3.10 Metrics
+- **What**: Exposed `/actuator/prometheus` and `/actuator/metrics`. Spring Cloud Gateway's built-in `gateway.requests` Micrometer timer provides per-route latency, status code, and outcome dimensions.
+- **Files Changed**: `pom.xml` (+`micrometer-registry-prometheus`), `application.yml`.
+
+### ✅ 3.11 Tests
+- **What**: WebTestClient tests for: circuit-breaker fallback returns 503+JSON; security headers present on error responses; bad Content-Type → 415; oversized Idempotency-Key → 400; method allowlist returns 404 for TRACE/OPTIONS.
+- **Files Changed**: `GatewayHardeningIntegrationTest.java` (NEW).
+
+### Summary of Phase 3 Changes
+- **Total Files Modified**: 6 (`pom.xml`, `application.yml`, `GatewayRoutesConfiguration.java`, `RateLimiterConfig.java`, `ApiGatewayProperties.java`, `IdempotencyHeaderValidationFilter.java`)
+- **New Files**: 5 (`FallbackController.java`, `SecurityHeadersFilter.java`, `ContentTypeValidationFilter.java`, `RedisReadinessIndicator.java`, `GatewayHardeningIntegrationTest.java`)
+- **Dependencies Added**: `spring-cloud-starter-circuitbreaker-reactor-resilience4j`, `spring-boot-starter-actuator`, `micrometer-registry-prometheus`
  
  ### Testing the Hardening
  

@@ -14,11 +14,15 @@ sequenceDiagram
     participant Client as External Client
     participant CorrelationFilter as CorrelationIdFilter
     participant AccessLogFilter as AccessLogFilter
+    participant ContentTypeFilter as ContentTypeValidationFilter
     participant IdempotencyFilter as IdempotencyHeaderValidationFilter
     participant RoutesConfig as GatewayRoutesConfiguration
     participant RateLimiter as RequestRateLimiter (Redis)
     participant SizeFilter as RequestSizeFilter (10 KB)
+    participant CircuitBreaker as CircuitBreaker (Resilience4j)
+    participant RetryFilter as Retry (GET only)
     participant WalletCore as Downstream (Wallet Core)
+    participant SecurityHeaders as SecurityHeadersFilter (WebFilter — beforeCommit)
     
     Client->>CorrelationFilter: 1. Sends HTTP Request
     activate CorrelationFilter
@@ -28,55 +32,84 @@ sequenceDiagram
     
     activate AccessLogFilter
     AccessLogFilter->>AccessLogFilter: 4. Logs start time & request details
-    AccessLogFilter->>IdempotencyFilter: 5. Forwards request
+    AccessLogFilter->>ContentTypeFilter: 5. Forwards request
     deactivate AccessLogFilter
     
+    activate ContentTypeFilter
+    alt Method is POST/PUT/PATCH
+        ContentTypeFilter->>ContentTypeFilter: 6. Validates Content-Type is application/json
+        note right of ContentTypeFilter: Rejects with 415 Unsupported Media Type if not JSON
+    end
+    ContentTypeFilter->>IdempotencyFilter: 7. Forwards request
+    deactivate ContentTypeFilter
+
     activate IdempotencyFilter
     alt Method is POST/PUT/PATCH/DELETE on protected path
-        IdempotencyFilter->>IdempotencyFilter: 6. Validates Idempotency-Key UUID format
-        note right of IdempotencyFilter: Rejects with 400 Bad Request if missing/invalid
+        IdempotencyFilter->>IdempotencyFilter: 8. Validates Idempotency-Key (length cap 128 chars + UUID format)
+        note right of IdempotencyFilter: Rejects with 400 Bad Request if missing/invalid/oversized
     end
-    IdempotencyFilter->>RoutesConfig: 7. Forwards request
+    IdempotencyFilter->>RoutesConfig: 9. Forwards request
     deactivate IdempotencyFilter
     
     activate RoutesConfig
-    RoutesConfig->>RoutesConfig: 8. Matches path to defined routes (e.g. /api/v1/wallets/**)
-    RoutesConfig->>RateLimiter: 9. Check rate limit (hybrid KeyResolver: IP/X-Client-Id)
+    RoutesConfig->>RoutesConfig: 10. Matches path + method allowlist (GET/POST/PUT/PATCH/DELETE only)
+    note right of RoutesConfig: TRACE/CONNECT/OPTIONS rejected (404 — no route match)
+    RoutesConfig->>RateLimiter: 11. Check rate limit (hybrid KeyResolver: IP/X-Client-Id)
     activate RateLimiter
     alt Rate limit exceeded
-        RateLimiter-->>Client: 9a. 429 Too Many Requests
+        RateLimiter-->>Client: 11a. 429 Too Many Requests
     else Within quota
-        RateLimiter->>SizeFilter: 9b. Forwards allowed request
+        RateLimiter->>SizeFilter: 11b. Forwards allowed request
     end
     deactivate RateLimiter
     
     activate SizeFilter
     alt Content-Length > 10 KB
-        SizeFilter-->>Client: 10a. 413 Payload Too Large
+        SizeFilter-->>Client: 12a. 413 Payload Too Large
     else Valid size
-        SizeFilter->>WalletCore: 10b. Routes to downstream service
+        SizeFilter->>CircuitBreaker: 12b. Forwards to circuit breaker
     end
     deactivate SizeFilter
     
+    activate CircuitBreaker
+    alt Circuit OPEN
+        CircuitBreaker-->>Client: 13a. 503 Service Unavailable (fallback JSON)
+    else Circuit CLOSED/HALF-OPEN
+        CircuitBreaker->>RetryFilter: 13b. Forwards to retry filter
+    end
+    deactivate CircuitBreaker
+
+    activate RetryFilter
+    RetryFilter->>WalletCore: 14. Routes to downstream (retry on GET 5xx, max 2 retries)
+    deactivate RetryFilter
+    
     activate WalletCore
-    WalletCore-->>Client: 11. Returns downstream response via gateway
+    WalletCore-->>SecurityHeaders: 15. Returns downstream response
+    deactivate WalletCore
+
+    activate SecurityHeaders
+    SecurityHeaders->>SecurityHeaders: 16. Injects security headers (nosniff, DENY, no-referrer, Cache-Control, HSTS)
+    SecurityHeaders-->>Client: 17. Returns hardened response via gateway
     deactivate WalletCore
 ```
 
 Below is an exhaustive breakdown of every file within the `api-gateway` service and its exact purpose.
 
 ## 1. Configuration Layer (`config/`)
-- **`GatewayRoutesConfiguration.java`**: Defines Spring Cloud Gateway routes using the fluent API. Each route specifies a predicate (e.g., path matching) and a destination URI. For example, routes like `GET /api/v1/wallets/**` are mapped to `http://wallet-core:8081/**`. This file is the source-of-truth for all downstream service mappings.
-- **`RateLimiterConfig.java`**: Configures Redis-backed rate limiting using Spring Cloud Gateway's `RequestRateLimiter` filter. Defines a hybrid `KeyResolver` that uses the `X-Client-Id` header if present, otherwise falls back to the source IP address. Specifies replenish rate (requests per second) and requested tokens per request.
+- **`GatewayRoutesConfiguration.java`**: Defines Spring Cloud Gateway routes using the fluent API. Each route specifies a predicate (e.g., path matching + HTTP method allowlist) and a destination URI. For example, routes like `GET/POST/PUT/PATCH/DELETE /api/v1/wallets/**` are mapped to `http://wallet-core:8081/**`. Includes a Resilience4j circuit breaker filter (configurable via `flash.gateway.resilience.circuit-breaker.enabled`) with a `/fallback/wallet-core` fallback, and a bounded retry filter (GET only, max 2 retries on 5xx/connect errors with jittered backoff). Disallowed HTTP methods (TRACE, CONNECT, OPTIONS outside CORS preflight) are rejected at the route predicate level — they never reach wallet-core. This file is the source-of-truth for all downstream service mappings.
+- **`RateLimiterConfig.java`**: Configures Redis-backed rate limiting using Spring Cloud Gateway's `RequestRateLimiter` filter. Defines a hybrid `KeyResolver` that uses the `X-Client-Id` header if present, otherwise falls back to the source IP address. Rate-limit values (replenishRate, burstCapacity, requestedTokens) are externalized to `flash.gateway.rate-limit.*` properties with sensible defaults.
 - **`GatewayStartupLogger.java`**: Logs all configured routes on application startup for operability and debugging.
-- **`ApiGatewayProperties.java`**: Custom Spring Boot property class (with `@ConfigurationProperties`) that allows external configuration of gateway settings (e.g., timeout values, CORS origins) via `application.yml`.
-- **`GatewayCorsConfiguration.java`**: Configures CORS (Cross-Origin Resource Sharing) to allow requests from approved frontend origins, specifying allowed headers and methods.
+- **`ApiGatewayProperties.java`**: Custom Spring Boot property class (with `@ConfigurationProperties`) that allows external configuration of gateway settings (e.g., timeout values, CORS origins, rate-limit numbers, resilience circuit-breaker enable/disable flag, security header toggles like HSTS, idempotency max header length).
+- **`GatewayCorsConfiguration.java`**: Configures CORS (Cross-Origin Resource Sharing) to allow requests from approved frontend origins, specifying an explicit allowlist of headers (Content-Type, Idempotency-Key, X-Request-Id, X-Client-Id, X-Client, Authorization). `allowCredentials=false`.
+- **`RedisReadinessIndicator.java`**: A custom reactive health indicator (`@Component("redisRateLimitStore")`) that checks Redis connectivity for the readiness probe. If Redis (the rate-limit backing store) is unreachable, the readiness endpoint reports DOWN.
 
 ## 2. Filter Layer (`filter/`)
 *Filters are the "middleware" of the gateway, executing custom logic for every request/response pair.*
 - **`CorrelationIdFilter.java`**: A gateway filter factory that injects a unique `X-Request-Id` UUID into every incoming request (if not already present). This correlation ID is propagated downstream to all microservices and logs, enabling end-to-end request tracing and debugging.
 - **`AccessLogFilter.java`**: Records incoming request details (method, path, source IP, timestamp, request headers) at INFO level before forwarding to the downstream service. After receiving the response, it logs response status and elapsed time. Useful for traffic auditing and performance monitoring.
-- **`IdempotencyHeaderValidationFilter.java`**: Validates the `Idempotency-Key` header on all mutating requests (POST, PUT, PATCH, DELETE) to protected paths. It enforces UUID format and rejects non-UUID keys with a 400 Bad Request response. This upstream check complements the downstream idempotency aspect in wallet-core.
+- **`ContentTypeValidationFilter.java`**: Rejects POST/PUT/PATCH requests that do not carry `Content-Type: application/json` with a 415 Unsupported Media Type response. Runs at order `HIGHEST_PRECEDENCE + 8` — before the idempotency filter — so that invalid Content-Type is caught first. Saves wallet-core a deserialization round-trip and produces a uniform 415 from the gateway.
+- **`IdempotencyHeaderValidationFilter.java`**: Validates the `Idempotency-Key` header on all mutating requests (POST, PUT, PATCH, DELETE) to protected paths. Enforces a 128-character length cap to prevent header-stuffing attacks (even when `strictUuid=false`). When strict UUID mode is enabled, validates UUID format and rejects non-UUID keys with a 400 Bad Request response. This upstream check complements the downstream idempotency aspect in wallet-core.
+- **`SecurityHeadersFilter.java`**: A `WebFilter` (not a `GlobalFilter`) at the Spring WebFlux layer that injects security headers on every response using `beforeCommit()`. This ensures headers are applied to all responses including circuit-breaker fallbacks and error handler responses. Runs at `HIGHEST_PRECEDENCE + 1`. Headers injected: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on `/api/v1/wallets/**` paths), and `Strict-Transport-Security` (configurable via `flash.gateway.security.hsts-enabled`, off in dev).
 - **`RequestSizeFilter.java`**: Rejects requests whose `Content-Length` exceeds a configurable threshold (default 10 KB) with a 413 Payload Too Large response. This protects downstream services from memory exhaustion and DOS attacks.
 
 ## 3. Exception Handling (`exception/`)
@@ -84,7 +117,59 @@ Below is an exhaustive breakdown of every file within the `api-gateway` service 
 - **`GatewayExceptionHandler.java`**: A `@ControllerAdvice` (or error handler hook) that catches exceptions at the gateway level (e.g., `RouteNotFoundException`, `UnsupportedMediaTypeException`) and returns standardized error responses in JSON format.
 
 ## 4. Security & Utilities (`util/`)
-- **`ApiGatewayApplication.java`**: The Spring Boot application entry point, annotated with `@SpringBootApplication` and `@EnableDiscoveryClient` to enable service discovery (if Eureka is configured).
+- **`ApiGatewayApplication.java`**: The Spring Boot application entry point, annotated with `@SpringBootApplication` and `@ConfigurationPropertiesScan`.
+
+## 5. Controller Layer (`controller/`)
+- **`FallbackController.java`**: Handles circuit breaker fallback requests. When the Resilience4j circuit breaker on the wallet-core route opens, requests are forwarded to `/fallback/wallet-core`, which returns a 503 Service Unavailable response wrapped in the standard `GatewayErrorResponse` JSON envelope.
+
+---
+
+## Resilience
+
+### Circuit Breaker (Resilience4j)
+The wallet-core route is protected by a Spring Cloud CircuitBreaker filter backed by Resilience4j. When downstream failures exceed the configured threshold, the circuit opens and requests are short-circuited to the fallback endpoint (`/fallback/wallet-core`) which returns a 503 JSON response immediately — protecting wallet-core from cascading failures.
+
+**Configuration** (externalized in `application.yml` under `resilience4j.circuitbreaker`):
+- `sliding-window-size`: Number of calls considered for failure rate calculation (default: 10)
+- `failure-rate-threshold`: Percentage of failures to trip the circuit (default: 50%)
+- `slow-call-duration-threshold`: Duration above which a call is considered slow (default: 5s)
+- `wait-duration-in-open-state`: How long the circuit stays open before transitioning to half-open (default: 30s)
+- `permitted-number-of-calls-in-half-open-state`: Probe calls allowed in half-open state (default: 3)
+- Feature flag: `flash.gateway.resilience.circuit-breaker.enabled` (default: true)
+
+### Bounded Retry
+GET requests to wallet-core are retried up to 2 times on 5xx or connection errors with jittered exponential backoff (100ms–1000ms, factor 2). Mutating verbs (POST/PUT/PATCH/DELETE) are **never** auto-retried — that is the client's responsibility under the idempotency-key contract.
+
+---
+
+## Security Headers
+
+The `SecurityHeadersFilter` (a `WebFilter` at `HIGHEST_PRECEDENCE + 1` using `beforeCommit()`) injects the following headers on every response — including circuit-breaker fallbacks and error handler responses:
+
+| Header | Value | Scope |
+|--------|-------|-------|
+| `X-Content-Type-Options` | `nosniff` | All responses |
+| `X-Frame-Options` | `DENY` | All responses |
+| `Referrer-Policy` | `no-referrer` | All responses |
+| `Cache-Control` | `no-store` | `/api/v1/wallets/**` paths only |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | Configurable: `flash.gateway.security.hsts-enabled` (off in dev) |
+
+---
+
+## Actuator
+
+The gateway exposes Kubernetes-ready health probes and Prometheus metrics:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/actuator/health/liveness` | Liveness probe — basic Spring Boot health |
+| `/actuator/health/readiness` | Readiness probe — includes custom `RedisReadinessIndicator` (fails if Redis is unreachable) |
+| `/actuator/prometheus` | Prometheus metrics scrape endpoint |
+| `/actuator/metrics` | Micrometer metrics endpoint |
+
+Only health, prometheus, and metrics endpoints are exposed. Sensitive endpoints (`/env`, `/heapdump`, `/beans`) are **not** exposed.
+
+Spring Cloud Gateway's built-in `gateway.requests` Micrometer timer is enabled with path tag dimensions, providing per-route latency and status code metrics out of the box.
 
 ---
 
@@ -93,7 +178,9 @@ Below is an exhaustive breakdown of every file within the `api-gateway` service 
 - **Spring Cloud Gateway**: Non-blocking, reactive gateway using Netty and Project Reactor. Scales horizontally.
 - **Stateless Design**: All gateway instances are identical; requests can be routed to any instance (horizontal scalability).
 - **Downstream Protocol**: Currently HTTP synchronous to `wallet-core` and other services. For async workloads (e.g., audit-worker Kafka consumers), events are published directly from wallet-core, bypassing the gateway.
-- **Security**: Rate limiting prevents brute-force attacks. Request size limits prevent DOS. Idempotency-Key validation ensures client idempotency awareness before reaching the core service.
+- **Resilience**: Circuit breaker (Resilience4j) protects wallet-core from cascading failures. Bounded retry (GET only, jittered backoff) handles transient downstream errors. Mutating verbs are never auto-retried.
+- **Security**: Rate limiting prevents brute-force attacks. Request size limits prevent DOS. Idempotency-Key validation with 128-char length cap and optional strict UUID enforcement. Content-Type allowlist rejects non-JSON mutating requests at the gateway. Security response headers (nosniff, DENY, no-referrer, HSTS) harden the HTTP contract. Method allowlist prevents TRACE/CONNECT/OPTIONS from reaching downstream services.
+- **Observability**: Actuator liveness/readiness probes (readiness gated on Redis). Prometheus metrics endpoint. Spring Cloud Gateway built-in Micrometer timers with per-route dimensions.
 
 ---
 
@@ -103,4 +190,5 @@ Below is an exhaustive breakdown of every file within the `api-gateway` service 
 - **Maven**: Standalone module. Build with `mvn clean install` from `api-gateway/` directory.
 - **Docker**: Runs on port `8080` by default. Configured in [docker-compose.yml](../docker-compose.yml).
 - **Downstream Services**: Gateway is configured to route to `http://wallet-core:8081` and `http://audit-worker:8082` (internal Docker network names).
-- **Redis**: Required for rate limiting state (shared across gateway instances in a cluster).
+- **Redis**: Required for rate limiting state (shared across gateway instances in a cluster) and readiness health check.
+- **Actuator**: Liveness at `/actuator/health/liveness`, readiness at `/actuator/health/readiness`, Prometheus at `/actuator/prometheus`.

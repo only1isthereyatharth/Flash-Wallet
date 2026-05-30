@@ -51,6 +51,12 @@ public class IdempotencyHeaderValidationFilter implements GlobalFilter, Ordered 
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Required header 'Idempotency-Key' is missing or empty.");
         }
 
+        if (idempotencyKey.length() > properties.getIdempotency().getMaxHeaderLength()) {
+            log.warn("Gateway rejected oversized Idempotency-Key: traceId={}, method={}, path={}, length={}", traceId, method, path, idempotencyKey.length());
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Header 'Idempotency-Key' exceeds maximum length of " + properties.getIdempotency().getMaxHeaderLength() + " characters.");
+        }
+
         if (properties.getIdempotency().isStrictUuid()) {
             try {
                 UUID.fromString(idempotencyKey);

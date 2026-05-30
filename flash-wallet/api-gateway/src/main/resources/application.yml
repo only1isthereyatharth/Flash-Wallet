@@ -12,6 +12,47 @@ spring:
       httpclient:
         connect-timeout: ${flash.gateway.http-client.connect-timeout-ms}
         response-timeout: ${flash.gateway.http-client.response-timeout-ms}ms
+      metrics:
+        enabled: true
+        tags:
+          path:
+            enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,redisRateLimitStore
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: ${GATEWAY_CB_SLIDING_WINDOW_SIZE:10}
+        failure-rate-threshold: ${GATEWAY_CB_FAILURE_RATE_THRESHOLD:50}
+        slow-call-duration-threshold: ${GATEWAY_CB_SLOW_CALL_DURATION:5s}
+        slow-call-rate-threshold: ${GATEWAY_CB_SLOW_CALL_RATE_THRESHOLD:80}
+        wait-duration-in-open-state: ${GATEWAY_CB_WAIT_DURATION_OPEN:30s}
+        permitted-number-of-calls-in-half-open-state: ${GATEWAY_CB_HALF_OPEN_CALLS:3}
+        minimum-number-of-calls: ${GATEWAY_CB_MIN_CALLS:5}
+    instances:
+      walletCoreCircuitBreaker:
+        base-config: default
 
 flash:
   gateway:
@@ -31,7 +72,12 @@ flash:
         - DELETE
         - OPTIONS
       allowed-headers:
-        - "*"
+        - Content-Type
+        - Idempotency-Key
+        - X-Request-Id
+        - X-Client-Id
+        - X-Client
+        - Authorization
       exposed-headers:
         - X-Request-Id
     logging:
@@ -43,6 +89,15 @@ flash:
       required-paths:
         - /api/v1/wallets/transfer
         - /api/v1/wallets/deposit
+    rate-limit:
+      replenish-rate: ${GATEWAY_RATE_LIMIT_REPLENISH_RATE:10}
+      burst-capacity: ${GATEWAY_RATE_LIMIT_BURST_CAPACITY:20}
+      requested-tokens: ${GATEWAY_RATE_LIMIT_REQUESTED_TOKENS:1}
+    resilience:
+      circuit-breaker:
+        enabled: ${GATEWAY_CIRCUIT_BREAKER_ENABLED:true}
+    security:
+      hsts-enabled: ${GATEWAY_HSTS_ENABLED:false}
 
 logging:
   level:
@@ -50,3 +105,4 @@ logging:
     com.services.apigateway: INFO
     org.springframework.cloud.gateway: INFO
     reactor.netty.http.client: INFO
+    io.github.resilience4j: INFO
