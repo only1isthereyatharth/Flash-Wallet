@@ -49,8 +49,7 @@ sequenceDiagram
     Gateway->>Core: Forwarded Request
     
     rect rgb(25, 25, 35)
-        Note over Core: SanitizationAspect trims & HTML-escapes all String fields
-        Note over Core: IdempotencyAspect intercepts request
+        Note over Core: IdempotencyAspect intercepts request & computes SHA-256 payload hash
         Core->>Redis: setIfAbsent(idempotency:KEY, "PROCESSING", TTL=5m)
         alt Key Already exists (Conflict / Replay)
             Redis-->>Core: false
@@ -90,7 +89,7 @@ sequenceDiagram
             Core->>DB: Load receiver wallet & validate currency
             Core->>DB: Credit receiver balance
             Core->>DB: Update transaction status to COMPLETED
-            Core->>KafkaAudit: Publish TRANSFER_COMPLETED event
+            Core->>KafkaAudit: Publish WALLET_TRANSFER_COMPLETED event
             Core-->>DB: Commit Transaction
             Core->>Redis: unlock(lock:wallet:RECEIVER)
         end
@@ -100,14 +99,14 @@ sequenceDiagram
             Core->>Redis: tryLock(lock:wallet:SENDER)
             Core->>DB: Re-credit sender balance (Refund)
             Core->>DB: Update transaction status to COMPENSATED
-            Core->>KafkaAudit: Publish TRANSFER_SAGA_FAILED event
+            Core->>KafkaAudit: Publish WALLET_TRANSFER_SAGA_FAILED event
             Core-->>DB: Commit Transaction
             Core->>Redis: unlock(lock:wallet:SENDER)
         end
     end
 
     opt Asynchronous Audit Logging
-        KafkaAudit->>Worker: Consume events (TRANSFER_COMPLETED / TRANSFER_SAGA_FAILED)
+        KafkaAudit->>Worker: Consume events (WALLET_TRANSFER_COMPLETED / WALLET_TRANSFER_SAGA_FAILED / WALLET_DEPOSIT_COMPLETED)
         Worker->>Worker: Validate message properties & deserialize
         alt Validation Success
             Worker->>AuditDB: Persist AuditLog (JSONB payload, partition, offset)
@@ -138,7 +137,7 @@ The backend codebase is organized as a Maven multi-module project (defined in [p
 | Microservice | Port | Description | Configuration File |
 | :--- | :--- | :--- | :--- |
 | **[api-gateway](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway)** | `8080` | Perimeter API Gateway using Spring Cloud Gateway. Enforces CORS, rate limiting (10 req/s, hybrid key strategy), 10 KB request size limits, generates correlation trace IDs, and rejects requests missing proper idempotency headers. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/resources/application.yml) |
-| **[wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core)** | `8081` | Core Domain Service. Manages wallets, executes synchronous transfers using double distributed lock ordering, sanitizes inputs post-validation, enforces idempotency, and publishes transaction events to Kafka. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/resources/application.yml) |
+| **[wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core)** | `8081` | Core Domain Service. Manages wallets, executes transfers via choreography-based saga, enforces payload-bound idempotency with SHA-256 hashing, validates ISO-4217 currency codes, and publishes transaction events to Kafka. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/resources/application.yml) |
 | **[audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker)** | `8082` | Compliance Audit Consumer. Consumes events asynchronously from Kafka, validates with strict Jackson deserialization, stores logs in JSONB format, and handles dead-letter recoveries. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/resources/application.yml) |
 
 ---
@@ -151,15 +150,15 @@ To avoid IEEE 754 floating-point rounding errors, all financial balances are sto
 * The presentation layer is responsible for scaling this value back on the UI.
 * See [Wallet.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/model/Wallet.java) and [Transaction.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/model/Transaction.java).
 
-### 2. Double-Click Protection & Sanitization
+### 2. Double-Click Protection & Payload-Bound Idempotency
 Every mutating API request (Deposit, Transfer) requires an `Idempotency-Key` UUID header.
 * The [IdempotencyHeaderValidationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/IdempotencyHeaderValidationFilter.java) at the Gateway validates header formats.
 * In [wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core), the custom annotation `@Idempotent` is intercepted by [IdempotencyAspect](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/idempotency/IdempotencyAspect.java).
-* It uses Redis `setIfAbsent` (equivalent to `SETNX`) with a `PROCESSING` status and a 5-minute guard TTL.
+* On first request, it computes a SHA-256 hash of the request payload and stores it alongside the idempotency state in Redis with a `PROCESSING` status and a 5-minute guard TTL.
 * If a concurrent request arrives before completion, it receives a `409 Conflict`.
 * Once completed, the final response payload is saved in Redis under `COMPLETED` status with a 24-hour TTL, allowing immediate replay returns.
+* On retry with an existing key, the aspect verifies the incoming payload hash matches the stored hash. If they differ, a `422 Unprocessable Entity` is returned to prevent replay attacks with mutated payloads.
 * If the underlying database transaction fails, the aspect catches the exception and calls `idempotencyService.fail(key)` to remove the Redis key, allowing the client to safely retry.
-* **Input Sanitization**: Implements [SanitizationAspect](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/idempotency/SanitizationAspect.java) which runs post-validation on all controller endpoints to trim string parameters and HTML-escape special characters (via Spring's `HtmlUtils`), preventing XSS and injection attacks.
 
 ### 3. Distributed Concurrency & Deadlock Prevention (Decoupled Locking)
 In traditional peer-to-peer transfers, locking both the sender and receiver wallets concurrently can lead to complex cyclical deadlocks (e.g., if User A pays User B while User B concurrently pays User A).
@@ -180,8 +179,8 @@ This project intentionally avoids heavy service discovery systems like Netflix E
 ### 6. Choreography-Based Saga Pattern (Distributed Transactions)
 To support high-throughput concurrent transaction processing while maintaining ledger consistency, P2P transfers are implemented as a **Choreography-based Saga** via Kafka.
 * **Step 1 (Debit)**: A write-ahead transaction record is created with `INITIATED` status. The sender's wallet is debited, the transaction status is atomically updated to `DEBIT_COMPLETED`, and a `TRANSFER_DEBIT_COMPLETED` event is published to the `wallet.saga.events` topic — all within a single `@Transactional` commit. The API immediately returns a `202 Accepted` response.
-* **Step 2 (Credit)**: The [TransferSagaConsumer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/saga/TransferSagaConsumer.java) consumes the event from `wallet.saga.events`. It locks the receiver's wallet, credits the balance, marks the transaction status as `COMPLETED`, and streams a `TRANSFER_COMPLETED` event to the `wallet.transaction.events` topic for audit.
-* **Compensating Transaction (Refund)**: If Step 2 fails (e.g., due to receiver wallet not found, currency mismatch, or database issues), the consumer initiates a compensating transaction. It locks the sender's wallet, refunds the debited amount, updates the transaction status to `COMPENSATED`, and streams a `TRANSFER_SAGA_FAILED` event to `wallet.transaction.events` for compliance auditing.
+* **Step 2 (Credit)**: The [TransferSagaConsumer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/saga/TransferSagaConsumer.java) consumes the event from `wallet.saga.events`. It locks the receiver's wallet, credits the balance, marks the transaction status as `COMPLETED`, and streams a `WALLET_TRANSFER_COMPLETED` event to the `wallet.transaction.events` topic for audit.
+* **Compensating Transaction (Refund)**: If Step 2 fails (e.g., due to receiver wallet not found, currency mismatch, or database issues), the consumer initiates a compensating transaction. It locks the sender's wallet, refunds the debited amount, updates the transaction status to `COMPENSATED`, and streams a `WALLET_TRANSFER_SAGA_FAILED` event to `wallet.transaction.events` for compliance auditing.
 * **DLT Exhaustion (`FAILED`)**: If the compensating transaction itself fails after all Kafka retries (exponential backoff, up to 3 attempts), the event is routed to the Dead-Letter Topic (`wallet.saga.events.DLT`). The [SagaDltRecoverer](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/saga/SagaDltRecoverer.java) marks the transaction as `FAILED` — a catastrophic terminal state indicating money is debited but not returned. This requires immediate manual intervention.
 
 ### 7. Write-Ahead Log Pattern (Safe Transaction Status Persistence)
@@ -453,8 +452,7 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
   ```json
   {
     "transactionId": "b6a3b2cb-20c2-4876-b633-5c8e2bd06a74",
-    "status": "COMPLETED",
-    "idempotencyKey": "f2d58bf5-4089-4b68-b80c-7b1981bdeebf"
+    "status": "COMPLETED"
   }
   ```
   | Status | Meaning |
@@ -519,9 +517,9 @@ curl -X POST http://localhost:8080/api/v1/wallets/deposit \
 ### 3. Verify Idempotency Protection
 Re-run the exact same curl request above.
 * **Expected Result:** Instant HTTP `200 OK` returned with the exact same response content, bypasses postgres and resolves directly from Redis memory.
-* If you change the body parameters but send the same key, it will still yield the exact same response content (as transaction was already completed under that key), protecting against replay issues.
+* If you change the body parameters but send the same key, the SHA-256 payload hash will differ from the stored hash, and you will receive HTTP `422 Unprocessable Entity` (payload hash mismatch). This prevents replay attacks with mutated payloads.
 
-Now, send a request with a new body parameters while a request is running, or if you simulate quick concurrent hits on the same key:
+Now, send a request while a previous request with the same key is still processing (concurrent hit):
 * **Expected Result:** HTTP `409 Conflict` representing a locked concurrency conflict state.
 
 ### 4. Perform P2P Transfer (Wallet A -> Wallet B)
@@ -557,4 +555,108 @@ mvn test
 To run tests for a specific module:
 ```bash
 mvn -pl wallet-core test
+ 
+ ---
+ 
+ ## 🔒 Phase 1 & 2: Security Hardening Improvements (Commit: bb16e8a)
+ 
+ Recent improvements to the wallet-core service strengthen data integrity, transaction security, and input validation.
+ 
+ ### ✅ Phase 1: Data Integrity & Idempotency Hardening
+ 
+ #### Payload Hash Binding for Idempotency Keys
+ - **Issue**: Idempotency keys alone do not prevent replay attacks with mutated payloads. A malicious user could retry a transfer with the same key but different amount.
+ - **Solution**: Idempotency keys are now cryptographically bound to SHA-256 hashes of the request body.
+ - **Implementation**: 
+   - `IdempotencyAspect` computes `SHA-256(request payload)` on every request.
+   - On first request: stores both the idempotency state and the payload hash in Redis.
+   - On retry: verifies the incoming payload hash matches the stored hash. If they differ, throws `IdempotencyPayloadMismatchException` (422 Unprocessable Entity) instead of returning a cached response.
+ - **Files Changed**: `IdempotencyAspect.java`, `IdempotencyService.java`, `IdempotencyState.java`, `IdempotencyPayloadMismatchException.java` (NEW).
+ 
+ #### Database Constraint Violation Handling
+ - **Issue**: Generic 500 responses for database constraint violations leak internal implementation details and confuse clients.
+ - **Solution**: `DataIntegrityViolationException` is now caught and inspected. Idempotency key or user_id constraint violations return 409 Conflict.
+ - **Files Changed**: `GlobalExceptionHandler.java`.
+ 
+ #### JPA Entity Anti-Pattern Fix
+ - **Issue**: Using `@Data` on JPA entities incorrectly includes lazy-loaded fields and versioning columns in equals/hashCode, breaking Hibernate proxy comparisons.
+ - **Solution**: Replaced `@Data` with explicit `@Getter`, `@Setter`, `@ToString`, `@EqualsAndHashCode(of = "id")` to ensure equals/hashCode only considers the primary key.
+ - **Files Changed**: `Wallet.java`, `Transaction.java`.
+ 
+ ### ✅ Phase 2: Input Validation Tightening
+ 
+ #### Arithmetic Overflow Prevention
+ - **Issue**: Very large amount values could wrap around due to integer overflow during balance arithmetic (balance + amount > Long.MAX_VALUE).
+ - **Solution**: 
+   - API DTOs include `@Max(1_000_000_000_000L)` constraint on amount fields (maximum ~10 trillion in lowest denomination).
+   - Service methods add runtime overflow guards: `if (wallet.getBalance() > Long.MAX_VALUE - request.amount())` before any arithmetic.
+ - **Files Changed**: `TransferRequest.java`, `DepositRequest.java`, `WalletService.java`, `TransferSagaConsumer.java`.
+ 
+ #### ISO-4217 Currency Code Validation
+ - **Issue**: Naive `@Size(min=3, max=3)` validation accepts any 3-letter string, not just valid currency codes.
+ - **Solution**: Custom `@CurrencyCode` JSR-380 constraint validates codes via `java.util.Currency.getInstance()`, ensuring only valid ISO-4217 codes are accepted (e.g., "USD", "EUR", "INR"). Rejects invalid codes like "ABC" immediately.
+ - **Files Changed**: `CurrencyCode.java` (NEW), `CurrencyCodeValidator.java` (NEW), `CreateWalletRequest.java`, `DepositRequest.java`, `TransferRequest.java`.
+ 
+ #### Locale-Safe Currency Normalization
+ - **Issue**: Using `currency.toUpperCase()` without a locale can produce unexpected results in certain locales (e.g., Turkish 'i' → 'İ').
+ - **Solution**: Changed to `currency.toUpperCase(Locale.ROOT)` for deterministic uppercase conversion.
+ - **Files Changed**: `WalletService.java`.
+ 
+ #### Type-Safe Response DTOs
+ - **Issue**: Transaction status endpoint returned untyped `Map<String, String>`, prone to field leakage and runtime errors.
+ - **Solution**: New `TransactionStatusResponse` record (`record TransactionStatusResponse(UUID transactionId, String status)`) provides compile-time type safety and idempotencyKey removed from response.
+ - **Files Changed**: `TransactionStatusResponse.java` (NEW), `WalletController.java`.
+ 
+ #### Controller Validation Activation
+ - **Issue**: JSR-380 constraints on method parameters were not enforced unless explicitly requested.
+ - **Solution**: Added `@Validated` class-level annotation to `WalletController` to activate method-level constraint validation.
+ - **Files Changed**: `WalletController.java`.
+ 
+ #### Removal of Output Sanitization
+ - **Issue**: Service-layer HTML-escaping (SanitizationAspect) corrupts stored data for non-HTML consumers (mobile apps, microservices).
+ - **Solution**: Deleted `SanitizationAspect`. Sanitization should occur at the presentation layer (API Gateway / frontend), not in the core service.
+ - **Files Changed**: Deleted `SanitizationAspect.java`.
+ 
+ ### Summary of Changes
+ - **Total Files Modified**: 17
+ - **New Files**: 4 (`IdempotencyPayloadMismatchException.java`, `CurrencyCode.java`, `CurrencyCodeValidator.java`, `TransactionStatusResponse.java`)
+ - **Files Deleted**: 1 (`SanitizationAspect.java`)
+ - **Maven Build**: ✅ SUCCESS (JDK 21)
+ 
+ ### Testing the Hardening
+ 
+ #### Test Payload Hash Binding
+ ```bash
+ # First request with correct payload
+ curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+   -H "Content-Type: application/json" \
+   -H "Idempotency-Key: 12345678-1234-1234-1234-123456789012" \
+   -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 1000, "currency": "USD"}'
+ 
+ # Second request: modify amount but keep same idempotency key
+ # Expected: HTTP 422 Unprocessable Entity (payload hash mismatch detected)
+ curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+   -H "Content-Type: application/json" \
+   -H "Idempotency-Key: 12345678-1234-1234-1234-123456789012" \
+   -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 2000, "currency": "USD"}'
+ ```
+ 
+ #### Test Invalid Currency Code
+ ```bash
+ curl -X POST http://localhost:8080/api/v1/wallets \
+   -H "Content-Type: application/json" \
+   -d '{"userId": "some-uuid", "currency": "XYZ"}'
+ # Expected: HTTP 400 Bad Request (invalid ISO-4217 code)
+ ```
+ 
+ #### Test Maximum Amount Constraint
+ ```bash
+ curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+   -H "Content-Type: application/json" \
+   -H "Idempotency-Key: some-uuid" \
+   -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 999999999999999, "currency": "USD"}'
+ # Expected: HTTP 400 Bad Request (amount exceeds @Max constraint)
+ ```
+ 
+ ---
 ```

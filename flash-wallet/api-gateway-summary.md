@@ -51,47 +51,56 @@ sequenceDiagram
     deactivate RateLimiter
     
     activate SizeFilter
-    alt Body exceeds 10 KB
+    alt Content-Length > 10 KB
         SizeFilter-->>Client: 10a. 413 Payload Too Large
-    else Body within limit
-        SizeFilter->>WalletCore: 10b. Proxies request to Downstream Service
+    else Valid size
+        SizeFilter->>WalletCore: 10b. Routes to downstream service
     end
     deactivate SizeFilter
     
     activate WalletCore
-    WalletCore-->>AccessLogFilter: 11. Returns HTTP Response
+    WalletCore-->>Client: 11. Returns downstream response via gateway
     deactivate WalletCore
-    
-    activate AccessLogFilter
-    AccessLogFilter->>AccessLogFilter: 12. Calculates duration & logs response status
-    AccessLogFilter-->>Client: 13. Returns response with X-Request-Id header
-    deactivate AccessLogFilter
 ```
 
 Below is an exhaustive breakdown of every file within the `api-gateway` service and its exact purpose.
 
-## 1. Root & Configuration Files
-- **`pom.xml`**: Maven configuration pulling in Spring Cloud Gateway dependencies, enabling reactive web routing based on Project Reactor.
-- **`Dockerfile`**: Defines the Docker container setup for deploying the API Gateway.
-- **`ApiGatewayApplication.java`**: The Spring Boot entry point that bootstraps the Gateway service.
+## 1. Configuration Layer (`config/`)
+- **`GatewayRoutesConfiguration.java`**: Defines Spring Cloud Gateway routes using the fluent API. Each route specifies a predicate (e.g., path matching) and a destination URI. For example, routes like `GET /api/v1/wallets/**` are mapped to `http://wallet-core:8081/**`. This file is the source-of-truth for all downstream service mappings.
+- **`RateLimiterConfig.java`**: Configures Redis-backed rate limiting using Spring Cloud Gateway's `RequestRateLimiter` filter. Defines a hybrid `KeyResolver` that uses the `X-Client-Id` header if present, otherwise falls back to the source IP address. Specifies replenish rate (requests per second) and requested tokens per request.
+- **`GatewayStartupLogger.java`**: Logs all configured routes on application startup for operability and debugging.
+- **`ApiGatewayProperties.java`**: Custom Spring Boot property class (with `@ConfigurationProperties`) that allows external configuration of gateway settings (e.g., timeout values, CORS origins) via `application.yml`.
+- **`GatewayCorsConfiguration.java`**: Configures CORS (Cross-Origin Resource Sharing) to allow requests from approved frontend origins, specifying allowed headers and methods.
 
-## 2. Configuration Layer (`config/`)
-- **`ApiGatewayProperties.java`**: Strongly-typed configuration class matching the `flash.gateway` prefix in `application.yml`. Holds properties for routing URIs, HTTP client timeouts, CORS rules, logging thresholds, and paths requiring strict idempotency.
-- **`GatewayCorsConfiguration.java`**: Configures Cross-Origin Resource Sharing (CORS) using a `CorsWebFilter`. It applies the allowed origins, methods, and exposed headers (like `X-Request-Id`) globally based on the configuration properties.
-- **`GatewayRoutesConfiguration.java`**: The core routing engine setup. Uses `RouteLocatorBuilder` to map specific path patterns (e.g., `/api/v1/wallets/**`, `/swagger-ui/**`) directly to the `wallet-core` downstream URI. It applies request size limits (10 KB) and Redis-backed rate limiting filters to downstream routes.
-- **`RateLimiterConfig.java`**: Configures Redis-backed rate limiting. Defines a hybrid `KeyResolver` that enforces strict IP-based rate limiting on authentication endpoints (`/api/v1/auth/**`), and checks `X-Client-Id` or `X-Client` headers (with IP fallback) for all other wallet core requests.
-- **`GatewayStartupLogger.java`**: An event listener that logs the configured properties and registered routes to the console as soon as the application is fully started, aiding in deployment verification.
+## 2. Filter Layer (`filter/`)
+*Filters are the "middleware" of the gateway, executing custom logic for every request/response pair.*
+- **`CorrelationIdFilter.java`**: A gateway filter factory that injects a unique `X-Request-Id` UUID into every incoming request (if not already present). This correlation ID is propagated downstream to all microservices and logs, enabling end-to-end request tracing and debugging.
+- **`AccessLogFilter.java`**: Records incoming request details (method, path, source IP, timestamp, request headers) at INFO level before forwarding to the downstream service. After receiving the response, it logs response status and elapsed time. Useful for traffic auditing and performance monitoring.
+- **`IdempotencyHeaderValidationFilter.java`**: Validates the `Idempotency-Key` header on all mutating requests (POST, PUT, PATCH, DELETE) to protected paths. It enforces UUID format and rejects non-UUID keys with a 400 Bad Request response. This upstream check complements the downstream idempotency aspect in wallet-core.
+- **`RequestSizeFilter.java`**: Rejects requests whose `Content-Length` exceeds a configurable threshold (default 10 KB) with a 413 Payload Too Large response. This protects downstream services from memory exhaustion and DOS attacks.
 
-## 3. Filter Layer (`filter/`)
-*Filters intercept requests globally to apply logic before or after they reach the downstream service.*
-- **`CorrelationIdFilter.java`**: Executes first (Highest Precedence). Ensures every incoming request has an `X-Request-Id` header. If absent, it generates a new UUID. This trace ID is attached to the request attributes and injected into the final response headers, allowing distributed tracing across all microservices.
-- **`AccessLogFilter.java`**: Executes after the Correlation filter. Logs the incoming request details (method, path, remote address). It measures execution time, and upon completion, logs whether the response was successful, a client error, a server error, or unusually slow based on configured thresholds.
-- **`IdempotencyHeaderValidationFilter.java`**: Evaluates modifying HTTP methods (POST, PUT, PATCH, DELETE) against specific protected paths (like `/api/v1/wallets/transfer`). It enforces that an `Idempotency-Key` header exists and is a valid UUID, returning a 400 Bad Request if validation fails, preventing duplicate transaction attempts from reaching the core.
-- **`NotFoundResponseWebFilter.java`**: A fallback filter with the lowest precedence. It catches unhandled 404 (Not Found) or 405 (Method Not Allowed) errors when a request fails to match any gateway routes, returning a standardized JSON error response rather than a default empty one.
+## 3. Exception Handling (`exception/`)
+- **`GatewayErrorResponse.java`**: A simple DTO record that wraps error details (timestamp, status code, error message, path) for consistent JSON error responses from the gateway.
+- **`GatewayExceptionHandler.java`**: A `@ControllerAdvice` (or error handler hook) that catches exceptions at the gateway level (e.g., `RouteNotFoundException`, `UnsupportedMediaTypeException`) and returns standardized error responses in JSON format.
 
-## 4. Exception Layer (`exception/`)
-- **`GatewayExceptionHandler.java`**: Implements `ErrorWebExceptionHandler` to catch exceptions globally (e.g., routing failures, downstream connection timeouts, or unresolvable hosts). It maps these errors to appropriate HTTP statuses (like `503 Service Unavailable` or `504 Gateway Timeout`), logs the failure securely, and serializes a structured JSON response.
-- **`GatewayErrorResponse.java`**: A Java Record representing the standardized JSON structure returned by the gateway during an error. It includes the timestamp, status code, error label, human-readable message, request path, and trace ID.
+## 4. Security & Utilities (`util/`)
+- **`ApiGatewayApplication.java`**: The Spring Boot application entry point, annotated with `@SpringBootApplication` and `@EnableDiscoveryClient` to enable service discovery (if Eureka is configured).
 
-## 5. Utility Layer (`util/`)
-- **`LogSanitizer.java`**: A helper component used by `AccessLogFilter` when verbose header logging is enabled. It truncates extremely long header values and masks sensitive headers (like `Authorization` and `Cookie`) with `***` to prevent logging sensitive user data.
+---
+
+## Architecture Notes
+
+- **Spring Cloud Gateway**: Non-blocking, reactive gateway using Netty and Project Reactor. Scales horizontally.
+- **Stateless Design**: All gateway instances are identical; requests can be routed to any instance (horizontal scalability).
+- **Downstream Protocol**: Currently HTTP synchronous to `wallet-core` and other services. For async workloads (e.g., audit-worker Kafka consumers), events are published directly from wallet-core, bypassing the gateway.
+- **Security**: Rate limiting prevents brute-force attacks. Request size limits prevent DOS. Idempotency-Key validation ensures client idempotency awareness before reaching the core service.
+
+---
+
+## Build & Deployment Notes
+
+- **Java**: Requires JDK 21+ (consistent with wallet-core)
+- **Maven**: Standalone module. Build with `mvn clean install` from `api-gateway/` directory.
+- **Docker**: Runs on port `8080` by default. Configured in [docker-compose.yml](../docker-compose.yml).
+- **Downstream Services**: Gateway is configured to route to `http://wallet-core:8081` and `http://audit-worker:8082` (internal Docker network names).
+- **Redis**: Required for rate limiting state (shared across gateway instances in a cluster).

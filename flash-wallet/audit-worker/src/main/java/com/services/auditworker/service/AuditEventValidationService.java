@@ -9,6 +9,7 @@ import org.springframework.util.StringUtils;
 public class AuditEventValidationService {
 
     private static final String TRANSFER_COMPLETED = "WALLET_TRANSFER_COMPLETED";
+    private static final String TRANSFER_SAGA_FAILED = "WALLET_TRANSFER_SAGA_FAILED";
     private static final String DEPOSIT_COMPLETED = "WALLET_DEPOSIT_COMPLETED";
 
     public void validate(TransactionEventMessage event) {
@@ -33,20 +34,20 @@ public class AuditEventValidationService {
 
         String normalizedEventType = event.eventType().trim();
         switch (normalizedEventType) {
-            case TRANSFER_COMPLETED -> validateTransferEvent(event);
+            case TRANSFER_COMPLETED, TRANSFER_SAGA_FAILED -> validateTransferEvent(event, normalizedEventType);
             case DEPOSIT_COMPLETED -> validateDepositEvent(event);
             default -> throw new AuditEventValidationException("Unsupported eventType: " + event.eventType());
         }
     }
 
-    private void validateTransferEvent(TransactionEventMessage event) {
+    private void validateTransferEvent(TransactionEventMessage event, String eventType) {
         if (event.senderWalletId() == null) {
             throw new AuditEventValidationException(
-                    "senderWalletId is required for eventType " + TRANSFER_COMPLETED);
+                    "senderWalletId is required for eventType " + eventType);
         }
         if (event.receiverWalletId() == null) {
             throw new AuditEventValidationException(
-                    "receiverWalletId is required for eventType " + TRANSFER_COMPLETED);
+                    "receiverWalletId is required for eventType " + eventType);
         }
     }
 

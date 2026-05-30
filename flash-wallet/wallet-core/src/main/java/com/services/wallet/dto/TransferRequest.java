@@ -1,8 +1,8 @@
 package com.services.wallet.dto;
 
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
-import jakarta.validation.constraints.Size;
 import lombok.Builder;
 
 import java.util.UUID;
@@ -17,9 +17,10 @@ public record TransferRequest(
 
     @NotNull(message = "Amount is required")
     @Positive(message = "Amount must be strictly positive")
+    @Max(value = 1_000_000_000_000L, message = "Amount exceeds maximum allowed limit")
     Long amount,
 
     @NotNull(message = "Currency is required")
-    @Size(min = 3, max = 3, message = "Currency code must be exactly 3 characters")
+    @CurrencyCode
     String currency
 ) {}

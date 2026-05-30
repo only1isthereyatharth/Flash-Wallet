@@ -24,6 +24,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.Locale;
 import java.util.UUID;
 
 
@@ -195,6 +196,11 @@ public class WalletService {
                 .build();
         transactionRepository.save(transaction);
 
+        // Overflow guard: ensure balance + amount doesn't exceed Long.MAX_VALUE
+        if (wallet.getBalance() > Long.MAX_VALUE - request.amount()) {
+            throw new IllegalArgumentException("Deposit would overflow wallet balance");
+        }
+
         // Update balance
         wallet.setBalance(wallet.getBalance() + request.amount());
         walletRepository.save(wallet);
@@ -232,7 +238,7 @@ public class WalletService {
                 .id(UUID.randomUUID())
                 .userId(userId)
                 .balance(0L)
-                .currency(currency.toUpperCase())
+                .currency(currency.toUpperCase(Locale.ROOT))
                 .build();
 
         walletRepository.save(wallet);
