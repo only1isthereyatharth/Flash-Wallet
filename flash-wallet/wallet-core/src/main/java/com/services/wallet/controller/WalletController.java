@@ -10,13 +10,14 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.Map;
 import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/wallets")
+@Validated
 @RequiredArgsConstructor
 @Slf4j
 public class WalletController {
@@ -86,14 +87,14 @@ public class WalletController {
      * @return 200 with status payload, or 404 if the transaction does not exist
      */
     @GetMapping("/transactions/{transactionId}")
-    public ResponseEntity<Map<String, String>> getTransactionStatus(
+    public ResponseEntity<TransactionStatusResponse> getTransactionStatus(
             @PathVariable UUID transactionId) {
         log.info("REST: Polling status for transactionId: {}", transactionId);
         return transactionRepository.findById(transactionId)
-                .map(tx -> ResponseEntity.ok(Map.of(
-                        "transactionId", tx.getId().toString(),
-                        "status", tx.getStatus().name(),
-                        "idempotencyKey", tx.getIdempotencyKey())))
+                .map(tx -> ResponseEntity.ok(TransactionStatusResponse.builder()
+                        .transactionId(tx.getId())
+                        .status(tx.getStatus().name())
+                        .build()))
                 .orElse(ResponseEntity.notFound().build());
     }
 }

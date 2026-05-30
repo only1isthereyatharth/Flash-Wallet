@@ -176,6 +176,11 @@ public class TransferSagaConsumer {
                                         event.currency(), receiver.getCurrency(), event.transactionId()));
                 }
 
+                // Overflow guard: ensure balance + amount doesn't exceed Long.MAX_VALUE
+                if (receiver.getBalance() > Long.MAX_VALUE - event.amount()) {
+                        throw new IllegalStateException("Credit would overflow receiver wallet balance for transactionId: " + event.transactionId());
+                }
+
                 receiver.setBalance(receiver.getBalance() + event.amount());
                 walletRepository.save(receiver);
 

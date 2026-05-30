@@ -6,6 +6,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
@@ -66,6 +67,30 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleOptimisticLocking(ObjectOptimisticLockingFailureException ex, HttpServletRequest request) {
         log.error("JPA Optimistic Lock check failed (secondary defense level): {}", ex.getMessage());
         return buildResponse(HttpStatus.CONFLICT, "Concurrent Update Conflict", "This resource was modified concurrently. Please retry.", request);
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ErrorResponse> handleDataIntegrityViolation(DataIntegrityViolationException ex, HttpServletRequest request) {
+        String rootMessage = ex.getMostSpecificCause().getMessage();
+        if (rootMessage != null && rootMessage.contains("idempotency_key")) {
+            log.warn("Duplicate idempotency key detected via DB constraint: {}", rootMessage);
+            return buildResponse(HttpStatus.CONFLICT, "Idempotency Conflict",
+                    "A transaction with this Idempotency-Key already exists.", request);
+        }
+        if (rootMessage != null && rootMessage.contains("user_id")) {
+            log.warn("Duplicate wallet for user detected via DB constraint: {}", rootMessage);
+            return buildResponse(HttpStatus.CONFLICT, "Duplicate Wallet",
+                    "A wallet already exists for this user.", request);
+        }
+        log.error("Data integrity violation: {}", rootMessage, ex);
+        return buildResponse(HttpStatus.CONFLICT, "Data Conflict",
+                "A data integrity constraint was violated. Please check your request.", request);
+    }
+
+    @ExceptionHandler(IdempotencyPayloadMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleIdempotencyPayloadMismatch(IdempotencyPayloadMismatchException ex, HttpServletRequest request) {
+        log.warn("Idempotency payload mismatch: {}", ex.getMessage());
+        return buildResponse(HttpStatus.UNPROCESSABLE_ENTITY, "Idempotency Payload Mismatch", ex.getMessage(), request);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

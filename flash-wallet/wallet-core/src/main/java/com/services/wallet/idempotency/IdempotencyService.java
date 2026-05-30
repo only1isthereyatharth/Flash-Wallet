@@ -20,9 +20,9 @@ public class IdempotencyService {
      * Attempts atomic registration of a request key under PROCESSING status.
      * Uses setIfAbsent (SETNX equivalent) with a guard TTL (e.g. 5 minutes) to avoid dead state if a crash happens mid-flight.
      */
-    public boolean tryStart(String key, Duration processingTimeout) {
+    public boolean tryStart(String key, Duration processingTimeout, String payloadHash) {
         RBucket<IdempotencyState> bucket = redissonClient.getBucket(KEY_PREFIX + key);
-        IdempotencyState state = new IdempotencyState("PROCESSING", null, 0);
+        IdempotencyState state = new IdempotencyState("PROCESSING", null, 0, payloadHash);
         boolean success = bucket.setIfAbsent(state, processingTimeout);
         log.debug("Idempotency tryStart for key: {}. Result: {}", key, success);
         return success;
@@ -39,9 +39,9 @@ public class IdempotencyService {
     /**
      * Marks the idempotency key as COMPLETED and buffers the payload with a 24-hour TTL.
      */
-    public void complete(String key, String responseBody, int statusCode) {
+    public void complete(String key, String responseBody, int statusCode, String payloadHash) {
         RBucket<IdempotencyState> bucket = redissonClient.getBucket(KEY_PREFIX + key);
-        IdempotencyState state = new IdempotencyState("COMPLETED", responseBody, statusCode);
+        IdempotencyState state = new IdempotencyState("COMPLETED", responseBody, statusCode, payloadHash);
         bucket.set(state, Duration.ofHours(24));
         log.debug("Idempotency complete for key: {}", key);
     }
