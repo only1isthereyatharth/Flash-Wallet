@@ -557,4 +557,108 @@ mvn test
 To run tests for a specific module:
 ```bash
 mvn -pl wallet-core test
+ 
+ ---
+ 
+ ## 🔒 Phase 1 & 2: Security Hardening Improvements (Commit: bb16e8a)
+ 
+ Recent improvements to the wallet-core service strengthen data integrity, transaction security, and input validation.
+ 
+ ### ✅ Phase 1: Data Integrity & Idempotency Hardening
+ 
+ #### Payload Hash Binding for Idempotency Keys
+ - **Issue**: Idempotency keys alone do not prevent replay attacks with mutated payloads. A malicious user could retry a transfer with the same key but different amount.
+ - **Solution**: Idempotency keys are now cryptographically bound to SHA-256 hashes of the request body.
+ - **Implementation**: 
+   - `IdempotencyAspect` computes `SHA-256(request payload)` on every request.
+   - On first request: stores both the idempotency state and the payload hash in Redis.
+   - On retry: verifies the incoming payload hash matches the stored hash. If they differ, throws `IdempotencyPayloadMismatchException` (422 Unprocessable Entity) instead of returning a cached response.
+ - **Files Changed**: `IdempotencyAspect.java`, `IdempotencyService.java`, `IdempotencyState.java`, `IdempotencyPayloadMismatchException.java` (NEW).
+ 
+ #### Database Constraint Violation Handling
+ - **Issue**: Generic 500 responses for database constraint violations leak internal implementation details and confuse clients.
+ - **Solution**: `DataIntegrityViolationException` is now caught and inspected. Idempotency key or user_id constraint violations return 409 Conflict.
+ - **Files Changed**: `GlobalExceptionHandler.java`.
+ 
+ #### JPA Entity Anti-Pattern Fix
+ - **Issue**: Using `@Data` on JPA entities incorrectly includes lazy-loaded fields and versioning columns in equals/hashCode, breaking Hibernate proxy comparisons.
+ - **Solution**: Replaced `@Data` with explicit `@Getter`, `@Setter`, `@ToString`, `@EqualsAndHashCode(of = "id")` to ensure equals/hashCode only considers the primary key.
+ - **Files Changed**: `Wallet.java`, `Transaction.java`.
+ 
+ ### ✅ Phase 2: Input Validation Tightening
+ 
+ #### Arithmetic Overflow Prevention
+ - **Issue**: Very large amount values could wrap around due to integer overflow during balance arithmetic (balance + amount > Long.MAX_VALUE).
+ - **Solution**: 
+   - API DTOs include `@Max(1_000_000_000_000L)` constraint on amount fields (maximum ~10 trillion in lowest denomination).
+   - Service methods add runtime overflow guards: `if (wallet.getBalance() > Long.MAX_VALUE - request.amount())` before any arithmetic.
+ - **Files Changed**: `TransferRequest.java`, `DepositRequest.java`, `WalletService.java`, `TransferSagaConsumer.java`.
+ 
+ #### ISO-4217 Currency Code Validation
+ - **Issue**: Naive `@Size(min=3, max=3)` validation accepts any 3-letter string, not just valid currency codes.
+ - **Solution**: Custom `@CurrencyCode` JSR-380 constraint validates codes via `java.util.Currency.getInstance()`, ensuring only valid ISO-4217 codes are accepted (e.g., "USD", "EUR", "INR"). Rejects invalid codes like "ABC" immediately.
+ - **Files Changed**: `CurrencyCode.java` (NEW), `CurrencyCodeValidator.java` (NEW), `CreateWalletRequest.java`, `DepositRequest.java`, `TransferRequest.java`.
+ 
+ #### Locale-Safe Currency Normalization
+ - **Issue**: Using `currency.toUpperCase()` without a locale can produce unexpected results in certain locales (e.g., Turkish 'i' → 'İ').
+ - **Solution**: Changed to `currency.toUpperCase(Locale.ROOT)` for deterministic uppercase conversion.
+ - **Files Changed**: `WalletService.java`.
+ 
+ #### Type-Safe Response DTOs
+ - **Issue**: Transaction status endpoint returned untyped `Map<String, String>`, prone to field leakage and runtime errors.
+ - **Solution**: New `TransactionStatusResponse` record (`record TransactionStatusResponse(UUID transactionId, String status)`) provides compile-time type safety and idempotencyKey removed from response.
+ - **Files Changed**: `TransactionStatusResponse.java` (NEW), `WalletController.java`.
+ 
+ #### Controller Validation Activation
+ - **Issue**: JSR-380 constraints on method parameters were not enforced unless explicitly requested.
+ - **Solution**: Added `@Validated` class-level annotation to `WalletController` to activate method-level constraint validation.
+ - **Files Changed**: `WalletController.java`.
+ 
+ #### Removal of Output Sanitization
+ - **Issue**: Service-layer HTML-escaping (SanitizationAspect) corrupts stored data for non-HTML consumers (mobile apps, microservices).
+ - **Solution**: Deleted `SanitizationAspect`. Sanitization should occur at the presentation layer (API Gateway / frontend), not in the core service.
+ - **Files Changed**: Deleted `SanitizationAspect.java`.
+ 
+ ### Summary of Changes
+ - **Total Files Modified**: 17
+ - **New Files**: 4 (`IdempotencyPayloadMismatchException.java`, `CurrencyCode.java`, `CurrencyCodeValidator.java`, `TransactionStatusResponse.java`)
+ - **Files Deleted**: 1 (`SanitizationAspect.java`)
+ - **Maven Build**: ✅ SUCCESS (JDK 21)
+ 
+ ### Testing the Hardening
+ 
+ #### Test Payload Hash Binding
+ ```bash
+ # First request with correct payload
+ curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+   -H "Content-Type: application/json" \
+   -H "Idempotency-Key: 12345678-1234-1234-1234-123456789012" \
+   -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 1000, "currency": "USD"}'
+ 
+ # Second request: modify amount but keep same idempotency key
+ # Expected: HTTP 422 Unprocessable Entity (payload hash mismatch detected)
+ curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+   -H "Content-Type: application/json" \
+   -H "Idempotency-Key: 12345678-1234-1234-1234-123456789012" \
+   -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 2000, "currency": "USD"}'
+ ```
+ 
+ #### Test Invalid Currency Code
+ ```bash
+ curl -X POST http://localhost:8080/api/v1/wallets \
+   -H "Content-Type: application/json" \
+   -d '{"userId": "some-uuid", "currency": "XYZ"}'
+ # Expected: HTTP 400 Bad Request (invalid ISO-4217 code)
+ ```
+ 
+ #### Test Maximum Amount Constraint
+ ```bash
+ curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+   -H "Content-Type: application/json" \
+   -H "Idempotency-Key: some-uuid" \
+   -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 999999999999999, "currency": "USD"}'
+ # Expected: HTTP 400 Bad Request (amount exceeds @Max constraint)
+ ```
+ 
+ ---
 ```
