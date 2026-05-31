@@ -1,0 +1,11 @@
+# ============================================================
+#  LOCAL PROFILE OVERRIDES — wallet-core
+# ============================================================
+#  This file overrides settings specifically for local development.
+#  Activated via: -Dspring.profiles.active=local
+# ============================================================
+
+# Example local overrides (change only what differs from common application.yml)
+logging:
+  level:
+    com.services: DEBUG

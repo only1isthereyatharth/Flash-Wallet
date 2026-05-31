@@ -1,12 +1,17 @@
+# ============================================================
+#  COMMON CONFIGURATION — api-gateway
+# ============================================================
 server:
   port: 8080
 
 spring:
   application:
     name: api-gateway
-  jackson:
-    deserialization:
-      fail-on-unknown-properties: true
+
+# ============================================================
+#  INFRASTRUCTURE CONFIGURATION (Environment-Driven)
+#  Contains: Upstream services, Gateway timeouts, Actuator, Security, and Logging
+# ============================================================
   cloud:
     gateway:
       httpclient:
@@ -38,6 +43,37 @@ management:
       export:
         enabled: true
 
+flash:
+  gateway:
+    services:
+      wallet-core-uri: ${WALLET_CORE_URI:http://localhost:8081}
+    http-client:
+      connect-timeout-ms: ${GATEWAY_CONNECT_TIMEOUT_MS:3000}
+      response-timeout-ms: ${GATEWAY_RESPONSE_TIMEOUT_MS:10000}
+    logging:
+      log-headers: ${GATEWAY_LOG_HEADERS:false}
+      slow-request-threshold-ms: ${GATEWAY_SLOW_REQUEST_THRESHOLD_MS:2000}
+      max-header-value-length: ${GATEWAY_MAX_HEADER_VALUE_LENGTH:120}
+    security:
+      hsts-enabled: ${GATEWAY_HSTS_ENABLED:false}
+
+logging:
+  level:
+    root: INFO
+    com.services.apigateway: INFO
+    org.springframework.cloud.gateway: INFO
+    reactor.netty.http.client: INFO
+    io.github.resilience4j: INFO
+
+# ============================================================
+#  APPLICATION CONFIGURATION (Business-Driven)
+#  Contains: Circuit Breaker, CORS, Idempotency, and Rate Limiting
+# ============================================================
+spring:
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+
 resilience4j:
   circuitbreaker:
     configs:
@@ -56,11 +92,6 @@ resilience4j:
 
 flash:
   gateway:
-    services:
-      wallet-core-uri: ${WALLET_CORE_URI:http://localhost:8081}
-    http-client:
-      connect-timeout-ms: ${GATEWAY_CONNECT_TIMEOUT_MS:3000}
-      response-timeout-ms: ${GATEWAY_RESPONSE_TIMEOUT_MS:10000}
     cors:
       allowed-origins:
         - ${FRONTEND_ORIGIN:http://localhost:5173}
@@ -80,10 +111,6 @@ flash:
         - Authorization
       exposed-headers:
         - X-Request-Id
-    logging:
-      log-headers: ${GATEWAY_LOG_HEADERS:false}
-      slow-request-threshold-ms: ${GATEWAY_SLOW_REQUEST_THRESHOLD_MS:2000}
-      max-header-value-length: ${GATEWAY_MAX_HEADER_VALUE_LENGTH:120}
     idempotency:
       strict-uuid: ${GATEWAY_STRICT_IDEMPOTENCY_UUID:true}
       required-paths:
@@ -96,13 +123,3 @@ flash:
     resilience:
       circuit-breaker:
         enabled: ${GATEWAY_CIRCUIT_BREAKER_ENABLED:true}
-    security:
-      hsts-enabled: ${GATEWAY_HSTS_ENABLED:false}
-
-logging:
-  level:
-    root: INFO
-    com.services.apigateway: INFO
-    org.springframework.cloud.gateway: INFO
-    reactor.netty.http.client: INFO
-    io.github.resilience4j: INFO
