@@ -123,7 +123,7 @@ sequenceDiagram
 ## 🛠️ Tech Stack & Infrastructure
 
 * **Backend Engine:** Java 21 / Spring Boot 4.0.6
-* **Message Broker:** Apache Kafka (Event-driven asynchronous audit engine)
+* **Message Broker:** Apache Kafka 4.x / KRaft mode (Event-driven asynchronous audit engine)
 * **Distributed Cache & Locking:** Redis (Redisson client for distributed locks and idempotency storage)
 * **Primary Relational Databases:** PostgreSQL (Isolated databases following Database-per-Service pattern)
 * **Container Orchestration:** Docker & Docker Compose
@@ -333,7 +333,7 @@ Use this method when actively debugging or developing the Java source code local
 #### 1. Spin up only the Database & Broker infrastructure
 Start only the backing dependencies in the background:
 ```bash
-docker-compose up -d postgres-db redis zookeeper kafka
+docker-compose up -d postgres-db redis kafka
 ```
 This boots Postgres (initializes databases using [init.sql](file:///c:/Users/parth/Flash-Wallet/postgres-init/init.sql)), Redis, and Kafka.
 
