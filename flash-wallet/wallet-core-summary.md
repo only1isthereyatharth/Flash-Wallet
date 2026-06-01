@@ -182,6 +182,120 @@ Below is an exhaustive breakdown of every file within the `wallet-core` service 
 
 ---
 
+## Redis Design Flow: Idempotency & Distributed Locking
+
+Redis plays **two separate roles** inside wallet-core. Each role uses its own key namespace and its own Redis client so they never interfere with each other.
+
+---
+
+### Role 1 — Idempotency (stop double-charging on retries)
+
+> **The problem it solves**: A mobile app times out and retries a transfer. Without this, the user gets charged twice.  
+> **The extra protection**: The request body is hashed (SHA-256) and stored alongside the key. If someone retries with a different amount but the same key, it is rejected — preventing replay attacks.
+
+**Redis key**: `idempotency:{idempotencyKey}`  
+**Owner**: `IdempotencyAspect` + `IdempotencyService`
+
+#### What happens step by step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant Aspect as IdempotencyAspect
+    participant Redis
+    participant Service as WalletService
+
+    Client->>Aspect: POST /transfer  (Idempotency-Key + payload)
+    Aspect->>Aspect: Hash the request body with SHA-256
+    Aspect->>Redis: Does this key already exist?  (GET idempotency:KEY)
+
+    alt Brand new request (key does not exist)
+        Aspect->>Redis: Save key as PROCESSING + hash, expires in 5 min  (SETNX + EXPIRE)
+        Aspect->>Service: Run the transfer
+        Service-->>Aspect: Success
+        Aspect->>Redis: Update key to COMPLETED + hash + cached response, expires in 24 h  (SET + EXPIRE)
+        Aspect-->>Client: 202 Accepted
+    else Another request with the same key is still running
+        Aspect-->>Client: 409 Conflict — wait and retry
+    else Key is COMPLETED and payload hash matches
+        Aspect-->>Client: Return the cached response instantly (no database hit)
+    else Key is COMPLETED but payload hash is DIFFERENT
+        Aspect-->>Client: 422 Unprocessable Entity — payload was changed, rejected
+    end
+```
+
+#### What is stored in Redis for each key
+
+| Field | Example value | Redis command used | Why it is needed |
+|-------|---------------|-------------------|------------------|
+| `status` | `PROCESSING` / `COMPLETED` | `SETNX` (set-if-not-exists) on first write; `SET` on completion | Tracks whether the request finished |
+| `payloadHash` | SHA-256 hex | Stored as a hash field alongside status | Detects if the retry changed the request body |
+| `responseBody` | Serialized JSON | Stored on `complete()` via `SET` | Returned directly on a safe retry — no DB call |
+| `httpStatus` | `202` | Stored on `complete()` via `SET` | HTTP status to replay back to the client |
+| TTL | 5 min / 24 h | `EXPIRE` (auto-set on each write) | 5-min guard prevents orphaned keys if the service crashes |
+
+---
+
+### Role 2 — Distributed wallet locks (stop two requests spending the same money)
+
+> **The problem it solves**: Two concurrent transfers from the same wallet could both read the same balance, both think there is enough money, and both debit — resulting in overspending.  
+> **How it is solved**: Before touching the database, a Redis lock is placed on the wallet ID. Only one request can hold the lock at a time.
+
+**Redis key**: `lock:wallet:{walletId}`  
+**Owner**: `LockManager` using the Redisson library
+
+#### Why the lock wraps the database transaction (not the other way around)
+
+The lock is acquired *before* `@Transactional` starts and released *after* the commit. If the lock were inside the transaction, a second thread could grab it before Hibernate flushes — creating a dirty read. Keeping it outside also means the database connection is only held for the short write window, not the full lock duration.
+
+#### What happens step by step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Service as WalletService
+    participant Lock as LockManager (Redisson)
+    participant Redis
+    participant DB as PostgreSQL
+
+    Service->>Lock: executeWithLock(senderWalletId)
+    Lock->>Redis: Try to claim lock  (SET lock:wallet:SENDER NX PX leaseTimeMs)
+    Note right of Redis: NX = only if not exists, PX = auto-expire in ms
+
+    alt Lock is free (SET returned OK)
+        Redis-->>Lock: Claimed
+        Lock->>DB: Open @Transactional — debit sender, update status
+        DB-->>Lock: Committed
+        Lock->>Redis: Release lock  (DEL lock:wallet:SENDER)
+        Lock-->>Service: Done
+    else Lock is already held (SET returned nil)
+        Redis-->>Lock: Rejected
+        Lock-->>Service: LockAcquisitionException — caller gets 409
+    end
+```
+
+#### Lock safety guarantees
+
+| Scenario | What happens | Redis command |
+|----------|--------------|---------------|
+| Normal completion | Lock is released immediately after the DB commit | `DEL lock:wallet:{id}` |
+| Service crashes mid-transaction | Lock expires automatically via Redisson lease timeout — no deadlock | `PX` (TTL set during `SET NX`) auto-expires the key |
+| Two requests on the same wallet | Second one is rejected while the first holds the lock | `SET NX` returns `nil` → `LockAcquisitionException` |
+| Two requests on different wallets | Both run in parallel — no blocking between unrelated wallets | Different keys, no contention |
+
+---
+
+### Redis Key Namespace Summary
+
+| Key pattern | Role | Redis commands used | TTL | What it does in plain language |
+|-------------|------|---------------------|-----|--------------------------------|
+| `idempotency:{key}` | Idempotency | `GET`, `SETNX`, `SET`, `EXPIRE`, `DEL` | 5 min (in-flight) / 24 h (done) | Remember what happened so retries are safe |
+| `lock:wallet:{walletId}` | Distributed lock | `SET NX PX`, `DEL` (via Redisson) | Short lease, auto-expires on crash | One request at a time per wallet |
+| `request_rate_limiter.{clientKey}.*` | API Gateway (`RedisRateLimiter`) | Auto-renewed | Token-bucket rate limiting (see api-gateway-summary) |
+
+---
+
 ## Build & Deployment Notes
 
 - **Java**: Requires JDK 21+ (records, pattern matching)

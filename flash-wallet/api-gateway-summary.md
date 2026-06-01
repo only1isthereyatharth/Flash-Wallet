@@ -130,6 +130,73 @@ Below is an exhaustive breakdown of every file within the `api-gateway` service 
 
 ---
 
+## Redis Design Flow: Rate Limiting
+
+> **The problem it solves**: Without rate limiting, a single client or a bot could flood wallet-core with thousands of requests per second. Redis enforces a per-client quota at the gateway edge — before the request ever reaches business logic.
+
+Redis is the **only stateful dependency of the API Gateway**, used exclusively for token-bucket rate limiting.
+
+### Step 1 — Who is the client?
+
+Before checking any quota, the gateway identifies *who* is making the request using `hybridKeyResolver`:
+
+```
+Incoming request
+     │
+     ├─ Has X-Client-Id header? ──YES──► quota bucket = X-Client-Id value
+     │
+     └─ NO ──────────────────────────► quota bucket = remote IP address
+```
+
+Known API clients (sending `X-Client-Id`) get their own independent bucket. Anonymous or browser traffic is bucketed by IP.
+
+### Step 2 — Token bucket check
+
+Imagine every client has a bucket of tokens. Each request spends one token. Tokens refill at a steady rate up to a maximum (burst cap).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Gateway as RequestRateLimiter Filter
+    participant Redis
+
+    Gateway->>Redis: EVALSHA request_rate_limiter.lua  (atomic Lua script)
+    Note right of Redis: Two keys per client:
+    Note right of Redis: request_rate_limiter.{clientKey}.tokens
+    Note right of Redis: request_rate_limiter.{clientKey}.timestamp
+    Redis->>Redis: 1. Top up: newTokens = min(burstCap, stored + elapsed × replenishRate)
+    Redis->>Redis: 2. Is there at least 1 token available?
+
+    alt Bucket has tokens
+        Redis->>Redis: 3a. Spend 1 token (SET tokens=remaining, timestamp=now)
+        Redis-->>Gateway: {allowed=1, remainingTokens}
+        Gateway->>Gateway: Forward request to wallet-core
+    else Bucket is empty
+        Redis-->>Gateway: {allowed=0, remainingTokens=0}
+        Gateway-->>Gateway: Return 429 Too Many Requests
+    end
+```
+
+> **`EVALSHA`** runs the entire read→calculate→write as a single atomic Lua script inside Redis — no race conditions even with multiple gateway pods hitting the same Redis. The `{clientKey}` in the key names ensures rate limits are enforced globally across the cluster, not per pod.
+
+### Step 3 — Configuration
+
+| Property (`flash.gateway.rate-limit.*`) | Default | Lua arg passed to Redis | Plain-language meaning |
+|-----------------------------------------|---------|------------------------|------------------------|
+| `replenishRate` | 10 | `rate` | Tokens added per second — the steady long-term speed limit |
+| `burstCapacity` | 20 | `capacity` | Maximum tokens the bucket can hold — allows short bursts above the steady rate |
+| `requestedTokens` | 1 | `requested` | Tokens spent per request |
+
+**Example with defaults**: a client can fire up to 20 requests in a burst, but can only sustain 10 requests/second before receiving 429s.
+
+### What happens when Redis is unavailable
+
+If Redis goes down the gateway cannot enforce rate limits, so it refuses new traffic rather than letting everything through unchecked:
+- `RedisReadinessIndicator` sets the readiness probe to `DOWN`
+- Kubernetes removes the pod from the load balancer until Redis recovers
+
+---
+
 ## Resilience
 
 ### Circuit Breaker (Resilience4j)
