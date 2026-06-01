@@ -198,6 +198,6 @@ Spring Cloud Gateway's built-in `gateway.requests` Micrometer timer is enabled w
 - **Java**: Requires JDK 21+ (consistent with wallet-core)
 - **Maven**: Standalone module. Build with `mvn clean install` from `api-gateway/` directory.
 - **Docker**: Runs on port `8080` by default. Configured in [docker-compose.yml](../docker-compose.yml).
-- **Downstream Services**: Gateway is configured to route to `http://wallet-core:8081` and `http://audit-worker:8082` (internal Docker network names).
+- **Downstream Services**: Gateway routes HTTP traffic only to `http://wallet-core:8081` (internal Docker network name). The `audit-worker` service is **not** a gateway upstream — it is a pure Kafka consumer that receives events published by `wallet-core` asynchronously, bypassing the gateway entirely.
 - **Redis**: Required for rate limiting state (shared across gateway instances in a cluster) and readiness health check.
 - **Actuator**: Liveness at `/actuator/health/liveness`, readiness at `/actuator/health/readiness`, Prometheus at `/actuator/prometheus`.

@@ -14,18 +14,23 @@ This architecture bypasses traditional, heavy enterprise patterns (like Eureka) 
                              ▼ (HTTP REST with Idempotency-Key & X-Request-Id)
                 [ flash-api-gateway (Port 8080) ]
                              │
-            ┌────────────────┴────────────────┐
-            ▼ (Internal Network Routing)      ▼
-  [ flash-wallet-core ]             [ flash-audit-worker ]
-     │         │    ▲                          │
-     ▼ (SETNX) │    │ (Consume)                ▼ (Append-Only)
- [ Redis ]     │    └───────┐             [ Audit DB ]
-     │         ▼            │                  ▲
-     │    [ Wallet Core DB ]│                  │
-     │                      │                  │
-     └─────────────► [ Kafka Topics ] ─────────┘
-                - wallet.saga.events (Saga)
-                - wallet.transaction.events (Audit)
+                             ▼ (HTTP — Internal Network Routing)
+                    [ flash-wallet-core ]
+                     │         │    ▲
+                     ▼ (SETNX) │    │ (Consume)
+                 [ Redis ]     │    └───────┐
+                     │         ▼            │
+                     │    [ Wallet Core DB ]│
+                     │                      │
+                     └─────────────► [ Kafka Topics ]
+                                  - wallet.saga.events (Saga)
+                                  - wallet.transaction.events (Audit)
+                                             │
+                                             ▼ (Async Kafka Consumer — NOT via Gateway)
+                                  [ flash-audit-worker ]
+                                             │
+                                             ▼ (Append-Only)
+                                        [ Audit DB ]
 ```
 
 ### Core Flow Sequence Diagram
