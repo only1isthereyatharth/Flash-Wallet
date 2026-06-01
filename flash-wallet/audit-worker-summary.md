@@ -145,6 +145,7 @@ Below is an exhaustive breakdown of every file within the `audit-worker` service
   - Partition assignment: balances partitions across consumer instances
 
 - **`AuditWorkerProperties.java`**: Custom `@ConfigurationProperties` for externalizing kafka topics, database settings, and retry policies via `application.yml`.
+- **Configuration Source Policy (Current)**: For local runs and small-scale product use, runtime values are primarily sourced from `application.yml` (and environment overrides), while `@ConfigurationProperties` classes may keep Java-level fallback defaults for minimal-environment resiliency. If YAML binding is missing or unavailable, static defaults can take effect. Team rule: when changing service URLs, topic names, hostnames, or ports, update both `application.yml` and corresponding Java defaults to avoid configuration drift.
 
 - **`JacksonSecurityConfig.java`**: Same security hardening as wallet-core: disables polymorphic deserialization and enforces strict type handling.
 

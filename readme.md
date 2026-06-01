@@ -137,8 +137,8 @@ The backend codebase is organized as a Maven multi-module project (defined in [p
 | Microservice | Port | Description | Configuration File |
 | :--- | :--- | :--- | :--- |
 | **[api-gateway](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway)** | `8080` | Perimeter API Gateway using Spring Cloud Gateway. Enforces CORS (explicit header allowlist), rate limiting (externalized config, hybrid key strategy), 10 KB request size limits, Content-Type validation (415 on non-JSON mutating requests), method allowlisting (rejects TRACE/CONNECT/OPTIONS), Idempotency-Key validation with 128-char length cap, security response headers via WebFilter `beforeCommit()` (nosniff, DENY, no-referrer, HSTS), Resilience4j circuit breaker with fallback, bounded retry (GET only), correlation trace IDs, actuator health probes (liveness + readiness gated on Redis), and Prometheus metrics. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/resources/application.yml) |
-| **[wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core)** | `8081` | Core Domain Service. Manages wallets, executes transfers via choreography-based saga, enforces payload-bound idempotency with SHA-256 hashing, validates ISO-4217 currency codes, and publishes transaction events to Kafka. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/resources/application.yml) |
-| **[audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker)** | `8082` | Compliance Audit Consumer. Consumes events asynchronously from Kafka, validates with strict Jackson deserialization, stores logs in JSONB format, and handles dead-letter recoveries. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/resources/application.yml) |
+| **[wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core)** | `8081` | Core Domain Service. Manages wallets, executes transfers via choreography-based saga, enforces payload-bound idempotency with SHA-256 hashing, validates ISO-4217 currency codes, and publishes transaction events to Kafka. Configuration policy (current): `application.yml`/env is the primary runtime source; Java config defaults may act as local/small-scale fallback if YAML binding is unavailable. Keep YAML and Java defaults synchronized when URLs/ports/broker endpoints change. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/resources/application.yml) |
+| **[audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker)** | `8082` | Compliance Audit Consumer. Consumes events asynchronously from Kafka, validates with strict Jackson deserialization, stores logs in JSONB format, and handles dead-letter recoveries. Configuration policy (current): `application.yml`/env is the primary runtime source; Java config defaults may act as local/small-scale fallback if YAML binding is unavailable. Keep YAML and Java defaults synchronized when URLs/ports/topic/endpoints change. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/resources/application.yml) |
 
 ---
 
@@ -208,6 +208,7 @@ In-progress states like "currently crediting" or "currently compensating" are **
 * **Idempotency-Key Length Cap**: Even when `strictUuid=false`, header length is capped at 128 characters to prevent header-stuffing attacks.
 * **Tighter CORS**: `allowedHeaders` uses an explicit allowlist (`Content-Type`, `Idempotency-Key`, `X-Request-Id`, `X-Client-Id`, `X-Client`, `Authorization`) instead of `*`. `allowCredentials=false`.
 * **Security Response Headers**: A `WebFilter`-based `SecurityHeadersFilter` (using `beforeCommit()` at the WebFlux layer) injects `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on wallet paths), and `Strict-Transport-Security` (configurable, off in dev). Because it operates at the WebFlux layer, headers are applied to all responses including circuit-breaker fallbacks and error handler responses.
+* **Configuration Source Policy (Current)**: For local runs and small-scale product use, API gateway settings are primarily configured via `application.yml` (and environment overrides), while `ApiGatewayProperties` retains Java-level fallback defaults for resiliency in minimal environments. This means if YAML binding fails or is absent, static defaults may take effect. Team rule: when changing service URLs or ports, update both `application.yml` and corresponding defaults in `ApiGatewayProperties` to prevent configuration drift.
 
 ### 9. Gateway Resilience (Circuit Breaker & Bounded Retry)
 * **Circuit Breaker**: The wallet-core route is protected by a Resilience4j circuit breaker. When downstream failures exceed the configured threshold (default 50% failure rate over a sliding window of 10 calls), the circuit opens and subsequent requests receive a 503 JSON response from the fallback endpoint immediately — protecting wallet-core from cascading load during outages. Configurable via `resilience4j.circuitbreaker.*` properties and feature-flagged via `flash.gateway.resilience.circuit-breaker.enabled`.
@@ -560,10 +561,13 @@ docker exec -it postgres-db psql -U postgres -d audit_worker_db -c "SELECT * FRO
 ## ⚙️ Running Automated Tests
 
 To execute the unit and integration tests written in JUnit 5, navigate to the `flash-wallet` directory and execute:
+
 ```bash
 mvn test
 ```
+
 To run tests for a specific module:
+
 ```bash
 mvn -pl wallet-core test
  

@@ -111,6 +111,7 @@ Below is an exhaustive breakdown of every file within the `wallet-core` service 
 - **`KafkaConfig.java`**: Defines the Kafka `NewTopic` (`wallet.transaction.events`) ensuring the topic exists with proper partitions and replicas on application startup.
 - **`JacksonSecurityConfig.java`**: Explicitly configures the global Spring Boot `ObjectMapper` to fail on unknown properties and disable default typing configurations to prevent polymorphic deserialization attacks.
 - **`OpenApiConfig.java`**: Configures Swagger/OpenAPI documentation generation for the REST API.
+- **Configuration Source Policy (Current)**: For local runs and small-scale product use, runtime configuration is primarily managed in `application.yml` (plus environment overrides), while Java configuration classes may retain fallback defaults for minimal setup scenarios. If YAML binding is missing or unavailable, static defaults can take effect. Team rule: when changing service URLs, ports, Kafka broker/topic settings, or Redis endpoints, update both `application.yml` and related Java defaults to keep configuration consistent.
 
 ## 9. Data Transfer Objects (`dto/` & `event/`)
 - **Input DTOs** (`CreateWalletRequest.java`, `DepositRequest.java`, `TransferRequest.java`): Immutable Java `record`s enforcing strict validation:

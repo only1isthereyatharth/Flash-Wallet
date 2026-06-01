@@ -96,15 +96,18 @@ sequenceDiagram
 Below is an exhaustive breakdown of every file within the `api-gateway` service and its exact purpose.
 
 ## 1. Configuration Layer (`config/`)
+
 - **`GatewayRoutesConfiguration.java`**: Defines Spring Cloud Gateway routes using the fluent API. Each route specifies a predicate (e.g., path matching + HTTP method allowlist) and a destination URI. For example, routes like `GET/POST/PUT/PATCH/DELETE /api/v1/wallets/**` are mapped to `http://wallet-core:8081/**`. Includes a Resilience4j circuit breaker filter (configurable via `flash.gateway.resilience.circuit-breaker.enabled`) with a `/fallback/wallet-core` fallback, and a bounded retry filter (GET only, max 2 retries on 5xx/connect errors with jittered backoff). Disallowed HTTP methods (TRACE, CONNECT, OPTIONS outside CORS preflight) are rejected at the route predicate level — they never reach wallet-core. This file is the source-of-truth for all downstream service mappings.
 - **`RateLimiterConfig.java`**: Configures Redis-backed rate limiting using Spring Cloud Gateway's `RequestRateLimiter` filter. Defines a hybrid `KeyResolver` that uses the `X-Client-Id` header if present, otherwise falls back to the source IP address. Rate-limit values (replenishRate, burstCapacity, requestedTokens) are externalized to `flash.gateway.rate-limit.*` properties with sensible defaults.
 - **`GatewayStartupLogger.java`**: Logs all configured routes on application startup for operability and debugging.
-- **`ApiGatewayProperties.java`**: Custom Spring Boot property class (with `@ConfigurationProperties`) that allows external configuration of gateway settings (e.g., timeout values, CORS origins, rate-limit numbers, resilience circuit-breaker enable/disable flag, security header toggles like HSTS, idempotency max header length).
+- **`ApiGatewayProperties.java`**: Custom Spring Boot property class (with `@ConfigurationProperties`) that allows external configuration of gateway settings (e.g., timeout values, CORS origins, rate-limit numbers, resilience circuit-breaker enable/disable flag, security header toggles like HSTS, idempotency max header length). For local runs and small-scale deployments, this class intentionally retains static defaults (for example `walletCoreUri = "http://localhost:8081"`) as a fallback when YAML/env configuration is missing. Operational rule: YAML is the primary runtime source, but if endpoints/ports are changed, keep both `application.yml` and Java defaults synchronized to avoid drift.
 - **`GatewayCorsConfiguration.java`**: Configures CORS (Cross-Origin Resource Sharing) to allow requests from approved frontend origins, specifying an explicit allowlist of headers (Content-Type, Idempotency-Key, X-Request-Id, X-Client-Id, X-Client, Authorization). `allowCredentials=false`.
 - **`RedisReadinessIndicator.java`**: A custom reactive health indicator (`@Component("redisRateLimitStore")`) that checks Redis connectivity for the readiness probe. If Redis (the rate-limit backing store) is unreachable, the readiness endpoint reports DOWN.
 
 ## 2. Filter Layer (`filter/`)
+
 *Filters are the "middleware" of the gateway, executing custom logic for every request/response pair.*
+
 - **`CorrelationIdFilter.java`**: A gateway filter factory that injects a unique `X-Request-Id` UUID into every incoming request (if not already present). This correlation ID is propagated downstream to all microservices and logs, enabling end-to-end request tracing and debugging.
 - **`AccessLogFilter.java`**: Records incoming request details (method, path, source IP, timestamp, request headers) at INFO level before forwarding to the downstream service. After receiving the response, it logs response status and elapsed time. Useful for traffic auditing and performance monitoring.
 - **`ContentTypeValidationFilter.java`**: Rejects POST/PUT/PATCH requests that do not carry `Content-Type: application/json` with a 415 Unsupported Media Type response. Runs at order `HIGHEST_PRECEDENCE + 8` — before the idempotency filter — so that invalid Content-Type is caught first. Saves wallet-core a deserialization round-trip and produces a uniform 415 from the gateway.
@@ -113,13 +116,16 @@ Below is an exhaustive breakdown of every file within the `api-gateway` service 
 - **`RequestSizeFilter.java`**: Rejects requests whose `Content-Length` exceeds a configurable threshold (default 10 KB) with a 413 Payload Too Large response. This protects downstream services from memory exhaustion and DOS attacks.
 
 ## 3. Exception Handling (`exception/`)
+
 - **`GatewayErrorResponse.java`**: A simple DTO record that wraps error details (timestamp, status code, error message, path) for consistent JSON error responses from the gateway.
 - **`GatewayExceptionHandler.java`**: A `@ControllerAdvice` (or error handler hook) that catches exceptions at the gateway level (e.g., `RouteNotFoundException`, `UnsupportedMediaTypeException`) and returns standardized error responses in JSON format.
 
 ## 4. Security & Utilities (`util/`)
+
 - **`ApiGatewayApplication.java`**: The Spring Boot application entry point, annotated with `@SpringBootApplication` and `@ConfigurationPropertiesScan`.
 
 ## 5. Controller Layer (`controller/`)
+
 - **`FallbackController.java`**: Handles circuit breaker fallback requests. When the Resilience4j circuit breaker on the wallet-core route opens, requests are forwarded to `/fallback/wallet-core`, which returns a 503 Service Unavailable response wrapped in the standard `GatewayErrorResponse` JSON envelope.
 
 ---
@@ -127,9 +133,11 @@ Below is an exhaustive breakdown of every file within the `api-gateway` service 
 ## Resilience
 
 ### Circuit Breaker (Resilience4j)
+
 The wallet-core route is protected by a Spring Cloud CircuitBreaker filter backed by Resilience4j. When downstream failures exceed the configured threshold, the circuit opens and requests are short-circuited to the fallback endpoint (`/fallback/wallet-core`) which returns a 503 JSON response immediately — protecting wallet-core from cascading failures.
 
 **Configuration** (externalized in `application.yml` under `resilience4j.circuitbreaker`):
+
 - `sliding-window-size`: Number of calls considered for failure rate calculation (default: 10)
 - `failure-rate-threshold`: Percentage of failures to trip the circuit (default: 50%)
 - `slow-call-duration-threshold`: Duration above which a call is considered slow (default: 5s)
@@ -138,6 +146,7 @@ The wallet-core route is protected by a Spring Cloud CircuitBreaker filter backe
 - Feature flag: `flash.gateway.resilience.circuit-breaker.enabled` (default: true)
 
 ### Bounded Retry
+
 GET requests to wallet-core are retried up to 2 times on 5xx or connection errors with jittered exponential backoff (100ms–1000ms, factor 2). Mutating verbs (POST/PUT/PATCH/DELETE) are **never** auto-retried — that is the client's responsibility under the idempotency-key contract.
 
 ---
