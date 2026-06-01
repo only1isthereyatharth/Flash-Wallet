@@ -90,7 +90,7 @@ sequenceDiagram
     activate SecurityHeaders
     SecurityHeaders->>SecurityHeaders: 16. Injects security headers (nosniff, DENY, no-referrer, Cache-Control, HSTS)
     SecurityHeaders-->>Client: 17. Returns hardened response via gateway
-    deactivate WalletCore
+    deactivate SecurityHeaders
 ```
 
 Below is an exhaustive breakdown of every file within the `api-gateway` service and its exact purpose.
