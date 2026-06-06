@@ -68,9 +68,10 @@ public class SagaKafkaConfig {
 
     /**
      * String-typed KafkaTemplate used exclusively by {@link SagaDltRecoverer}.
-     * Named explicitly so it does not conflict with the auto-configured
-     * {@code KafkaTemplate<String, TransactionEvent>} used by
-     * {@code WalletEventProducer}.
+     * Note: Declaring this bean disables Spring Boot's automatic KafkaTemplate
+     * auto-configuration (due to @ConditionalOnMissingBean on KafkaTemplate class).
+     * Consequently, the default KafkaTemplate<String, TransactionEvent> must be
+     * explicitly declared in KafkaConfig.java.
      */
     @Bean
     public KafkaTemplate<String, String> sagaStringKafkaTemplate(

@@ -7,6 +7,9 @@ server:
 spring:
   application:
     name: audit-worker
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
 
 # ============================================================
 #  INFRASTRUCTURE CONFIGURATION (Environment-Driven)
@@ -54,10 +57,6 @@ logging:
 #  APPLICATION CONFIGURATION (Business-Driven)
 #  Contains: Audit event topic names, listener concurrency, retry policies
 # ============================================================
-spring:
-  jackson:
-    deserialization:
-      fail-on-unknown-properties: true
 
 audit:
   worker:

@@ -108,7 +108,7 @@ Below is an exhaustive breakdown of every file within the `wallet-core` service 
 
 ## 8. Configuration Layer (`config/`)
 - **`RedissonConfig.java`**: Sets up the RedissonClient connection pool to Redis for distributed locking.
-- **`KafkaConfig.java`**: Defines the Kafka `NewTopic` (`wallet.transaction.events`) ensuring the topic exists with proper partitions and replicas on application startup.
+- **`KafkaConfig.java`**: Defines the Kafka `NewTopic` (`wallet.transaction.events`) ensuring the topic exists on startup. Now also explicitly registers `ProducerFactory` and `KafkaTemplate` beans for `TransactionEvent` to prevent Spring Boot's auto-configuration from being disabled by other custom Kafka beans (like Saga's DLT template).
 - **`JacksonSecurityConfig.java`**: Explicitly configures the global Spring Boot `ObjectMapper` to fail on unknown properties and disable default typing configurations to prevent polymorphic deserialization attacks.
 - **`OpenApiConfig.java`**: Configures Swagger/OpenAPI documentation generation for the REST API.
 - **Configuration Source Policy (Current)**: For local runs and small-scale product use, runtime configuration is primarily managed in `application.yml` (plus environment overrides), while Java configuration classes may retain fallback defaults for minimal setup scenarios. If YAML binding is missing or unavailable, static defaults can take effect. Team rule: when changing service URLs, ports, Kafka broker/topic settings, or Redis endpoints, update both `application.yml` and related Java defaults to keep configuration consistent.
@@ -293,6 +293,25 @@ sequenceDiagram
 | `idempotency:{key}` | Idempotency | `GET`, `SETNX`, `SET`, `EXPIRE`, `DEL` | 5 min (in-flight) / 24 h (done) | Remember what happened so retries are safe |
 | `lock:wallet:{walletId}` | Distributed lock | `SET NX PX`, `DEL` (via Redisson) | Short lease, auto-expires on crash | One request at a time per wallet |
 | `request_rate_limiter.{clientKey}.*` | API Gateway (`RedisRateLimiter`) | Auto-renewed | Token-bucket rate limiting (see api-gateway-summary) |
+
+---
+
+## Phase 4: Configuration & Kafka Autowiring Fixes
+
+### YAML Configuration Clean-up (Duplicate Keys)
+- **Issue**: YAML configuration files (`application.yml` across `api-gateway`, `audit-worker`, and `wallet-core`) contained duplicate top-level keys (`spring:` and `flash:`). This would have caused SnakeYAML parser exceptions (`ComposerException`) at startup, or silently overwritten properties due to the "last-key-wins" rule.
+- **Solution**: Merged all duplicate configuration blocks under single unified root keys (`spring:` and `flash:`), ensuring correct formatting and nesting structure across all three modules.
+- **Files Changed**: `api-gateway/src/main/resources/application.yml`, `audit-worker/src/main/resources/application.yml`, `wallet-core/src/main/resources/application.yml`.
+
+### Kafka Template Autowiring Resolution
+- **Issue**: Declaring custom Kafka configuration beans in `SagaKafkaConfig.java` (specifically `sagaStringKafkaTemplate` of type `KafkaTemplate<String, String>` and `sagaProducerFactory`) implicitly disabled Spring Boot's automatic autowiring of default Kafka components due to `@ConditionalOnMissingBean` constraints. This prevented `WalletEventProducer` from finding the required `KafkaTemplate<String, TransactionEvent>` bean, crashing startup.
+- **Solution**: Explicitly defined the `ProducerFactory<String, TransactionEvent>` and `KafkaTemplate<String, TransactionEvent>` beans inside `KafkaConfig.java` to make them available in the application context. Corrected the misleading documentation in `SagaKafkaConfig.java` to explain this override mechanism.
+- **Files Changed**: `KafkaConfig.java`, `SagaKafkaConfig.java`.
+
+### Circular Dependency Fix in TransferSagaConsumer
+- **Issue**: A self-referential circular dependency (`transferSagaConsumer` -> `transferSagaConsumer`) prevented startup. This was caused by an incorrect import of the `@Lazy` annotation from the Hibernate Validator internal package (`org.hibernate.validator.internal.util.stereotypes.Lazy`), which Spring Boot failed to recognize during proxy initialization.
+- **Solution**: Replaced the incorrect import with the standard Spring context annotation (`org.springframework.context.annotation.Lazy`).
+- **Files Changed**: `TransferSagaConsumer.java`.
 
 ---
 

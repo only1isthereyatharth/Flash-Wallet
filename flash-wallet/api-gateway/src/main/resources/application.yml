@@ -7,6 +7,9 @@ server:
 spring:
   application:
     name: api-gateway
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
 
 # ============================================================
 #  INFRASTRUCTURE CONFIGURATION (Environment-Driven)
@@ -56,42 +59,6 @@ flash:
       max-header-value-length: ${GATEWAY_MAX_HEADER_VALUE_LENGTH:120}
     security:
       hsts-enabled: ${GATEWAY_HSTS_ENABLED:false}
-
-logging:
-  level:
-    root: INFO
-    com.services.apigateway: INFO
-    org.springframework.cloud.gateway: INFO
-    reactor.netty.http.client: INFO
-    io.github.resilience4j: INFO
-
-# ============================================================
-#  APPLICATION CONFIGURATION (Business-Driven)
-#  Contains: Circuit Breaker, CORS, Idempotency, and Rate Limiting
-# ============================================================
-spring:
-  jackson:
-    deserialization:
-      fail-on-unknown-properties: true
-
-resilience4j:
-  circuitbreaker:
-    configs:
-      default:
-        sliding-window-type: COUNT_BASED
-        sliding-window-size: ${GATEWAY_CB_SLIDING_WINDOW_SIZE:10}
-        failure-rate-threshold: ${GATEWAY_CB_FAILURE_RATE_THRESHOLD:50}
-        slow-call-duration-threshold: ${GATEWAY_CB_SLOW_CALL_DURATION:5s}
-        slow-call-rate-threshold: ${GATEWAY_CB_SLOW_CALL_RATE_THRESHOLD:80}
-        wait-duration-in-open-state: ${GATEWAY_CB_WAIT_DURATION_OPEN:30s}
-        permitted-number-of-calls-in-half-open-state: ${GATEWAY_CB_HALF_OPEN_CALLS:3}
-        minimum-number-of-calls: ${GATEWAY_CB_MIN_CALLS:5}
-    instances:
-      walletCoreCircuitBreaker:
-        base-config: default
-
-flash:
-  gateway:
     cors:
       allowed-origins:
         - ${FRONTEND_ORIGIN:http://localhost:5173}
@@ -123,3 +90,33 @@ flash:
     resilience:
       circuit-breaker:
         enabled: ${GATEWAY_CIRCUIT_BREAKER_ENABLED:true}
+
+logging:
+  level:
+    root: INFO
+    com.services.apigateway: INFO
+    org.springframework.cloud.gateway: INFO
+    reactor.netty.http.client: INFO
+    io.github.resilience4j: INFO
+
+# ============================================================
+#  APPLICATION CONFIGURATION (Business-Driven)
+#  Contains: Circuit Breaker, CORS, Idempotency, and Rate Limiting
+# ============================================================
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: ${GATEWAY_CB_SLIDING_WINDOW_SIZE:10}
+        failure-rate-threshold: ${GATEWAY_CB_FAILURE_RATE_THRESHOLD:50}
+        slow-call-duration-threshold: ${GATEWAY_CB_SLOW_CALL_DURATION:5s}
+        slow-call-rate-threshold: ${GATEWAY_CB_SLOW_CALL_RATE_THRESHOLD:80}
+        wait-duration-in-open-state: ${GATEWAY_CB_WAIT_DURATION_OPEN:30s}
+        permitted-number-of-calls-in-half-open-state: ${GATEWAY_CB_HALF_OPEN_CALLS:3}
+        minimum-number-of-calls: ${GATEWAY_CB_MIN_CALLS:5}
+    instances:
+      walletCoreCircuitBreaker:
+        base-config: default
+

@@ -7,6 +7,9 @@ server:
 spring:
   application:
     name: wallet-core
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
 
 # ============================================================
 #  INFRASTRUCTURE CONFIGURATION (Environment-Driven)
@@ -65,10 +68,6 @@ logging:
 #  APPLICATION CONFIGURATION (Business-Driven)
 #  Contains: Saga orchestration, topic names, and Jackson contracts
 # ============================================================
-spring:
-  jackson:
-    deserialization:
-      fail-on-unknown-properties: true
 
 # Saga configuration — binds to com.services.wallet.saga.SagaProperties
 wallet:
@@ -81,3 +80,6 @@ wallet:
       initial-interval-ms: 1000
       multiplier: 2.0
       max-interval-ms: 8000   # 1s → 2s → 4s → 8s max cap
+
+  transfer:
+    mode: async # Options: async (default saga), sync (fallback)

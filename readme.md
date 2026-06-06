@@ -521,6 +521,201 @@ curl -X POST http://localhost:8080/api/v1/wallets \
   -d '{"userId": "22222222-2222-2222-2222-222222222222", "currency": "INR"}'
 ```
 *Note the returned `id` (wallet UUIDs) from the responses. Let's assume Wallet A's id is `UUID_A` and Wallet B's id is `UUID_B`.*
+* **postgres-db**: `5432`
+* **redis**: `6379`
+* **kafka**: `9092` / `29092`
+
+---
+
+### Option B: Run Backing Services in Docker & Microservices Locally
+
+Use this method when actively debugging or developing the Java source code locally.
+
+#### 1. Spin up only the Database & Broker infrastructure
+Start only the backing dependencies in the background:
+```bash
+docker-compose up -d postgres-db redis kafka
+```
+This boots Postgres (initializes databases using [init.sql](file:///c:/Users/parth/Flash-Wallet/postgres-init/init.sql)), Redis, and Kafka.
+
+#### 2. Build the Maven Project
+Package all modules:
+```bash
+cd flash-wallet
+mvn clean install -DskipTests
+```
+
+#### 3. Run each service on your local host
+Open three terminal windows inside the `flash-wallet` directory:
+
+* **Terminal 1: Start `api-gateway`**
+  ```bash
+  cd api-gateway
+  mvn spring-boot:run
+  ```
+* **Terminal 2: Start `wallet-core`**
+  ```bash
+  cd wallet-core
+  mvn spring-boot:run
+  ```
+* **Terminal 3: Start `audit-worker`**
+  ```bash
+  cd audit-worker
+  mvn spring-boot:run
+  ```
+
+Now the gateway is exposed on `http://localhost:8080`, reverse-proxying requests to `wallet-core` on port `8081`.
+
+## 📖 Swagger UI (Interactive API Documentation)
+
+Once the `api-gateway` and `wallet-core` services are running, you can access the interactive Swagger UI and OpenAPI documentation to test all endpoints:
+
+* **Swagger UI URL:** [http://localhost:8080/swagger-ui/index.html](http://localhost:8080/swagger-ui/index.html)
+* **Raw OpenAPI JSON Spec:** [http://localhost:8080/v3/api-docs](http://localhost:8080/v3/api-docs)
+
+This UI compiles all endpoints, payloads, HTTP responses, and validation constraints dynamically from [OpenApiConfig.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/config/OpenApiConfig.java). You can execute requests directly through the gateway (using port `8080`) by selecting it from the server drop-down menu in Swagger UI.
+
+---
+
+## 📡 REST API Reference
+
+All write operations should be routed through `flash-api-gateway` on port `8080`.
+
+### 1. Create Wallet
+* **Endpoint:** `POST /api/v1/wallets`
+* **Description:** Creates a new digital wallet for a user.
+* **Request Payload (`application/json`):**
+  ```json
+  {
+    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
+    "currency": "INR"
+  }
+  ```
+* **Response Payload (`201 Created`):**
+  ```json
+  {
+    "id": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
+    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
+    "balance": 0,
+    "currency": "INR",
+    "updatedAt": "2026-05-24T08:00:00Z"
+  }
+  ```
+
+---
+
+### 2. Deposit Funds
+* **Endpoint:** `POST /api/v1/wallets/deposit`
+* **Headers:** 
+  * `Idempotency-Key` (UUID, Required)
+* **Request Payload (`application/json`):**
+  ```json
+  {
+    "walletId": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
+    "amount": 50000,
+    "currency": "INR"
+  }
+  ```
+  *(Note: `50000` is 500.00 INR stored in Paisa)*
+* **Response Payload (`200 OK`):**
+  ```json
+  {
+    "id": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
+    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
+    "balance": 50000,
+    "currency": "INR",
+    "updatedAt": "2026-05-24T08:05:00Z"
+  }
+  ```
+
+---
+
+### 3. P2P Wallet-to-Wallet Transfer
+* **Endpoint:** `POST /api/v1/wallets/transfer`
+* **Headers:** 
+  * `Idempotency-Key` (UUID, Required)
+* **Request Payload (`application/json`):**
+  ```json
+  {
+    "senderWalletId": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
+    "receiverWalletId": "a1811e5c-7d9a-4c28-98e3-5a0d3f82b7db",
+    "amount": 15000,
+    "currency": "INR"
+  }
+  ```
+* **Response Payload (`202 Accepted`):**
+  ```json
+  {
+    "transactionId": "b6a3b2cb-20c2-4876-b633-5c8e2bd06a74",
+    "senderWalletId": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
+    "receiverWalletId": "a1811e5c-7d9a-4c28-98e3-5a0d3f82b7db",
+    "amount": 15000,
+    "status": "DEBIT_COMPLETED",
+    "message": "Transfer initiated. Use the transactionId to poll for the final status."
+  }
+  ```
+
+---
+
+### 4. Poll Transaction Status
+* **Endpoint:** `GET /api/v1/wallets/transactions/{transactionId}`
+* **Description:** Polls the current status of an initiated P2P transfer transaction.
+* **Response Payload (`200 OK`):**
+  ```json
+  {
+    "transactionId": "b6a3b2cb-20c2-4876-b633-5c8e2bd06a74",
+    "status": "COMPLETED"
+  }
+  ```
+  | Status | Meaning |
+  |---|---|
+  | `INITIATED` | Transaction record created, no money moved yet |
+  | `DEBIT_COMPLETED` | Sender debited, awaiting receiver credit (in-flight saga) |
+  | `COMPLETED` | Terminal success — both debit and credit committed |
+  | `COMPENSATED` | Terminal rollback — sender refunded cleanly |
+  | `FAILED` | Terminal error — compensation exhausted, manual intervention required |
+
+---
+
+### 5. Fetch Wallet Details
+* **Endpoint:** `GET /api/v1/wallets/{walletId}`
+* **Response Payload (`200 OK`):**
+  ```json
+  {
+    "id": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
+    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
+    "balance": 35000,
+    "currency": "INR",
+    "updatedAt": "2026-05-24T08:10:00Z"
+  }
+  ```
+
+---
+
+### 6. Fetch Wallet by User ID
+* **Endpoint:** `GET /api/v1/wallets/user/{userId}`
+* **Response Payload (`200 OK`):**
+  Same schema format as the general fetch endpoint.
+
+---
+
+## 🧪 End-to-End Verification & API Testing
+
+Ensure your application is running, and try these verification steps. We'll use `curl` to test the full lifecycle:
+
+### 1. Create Wallet A and Wallet B
+```bash
+# Create Wallet A
+curl -X POST http://localhost:8080/api/v1/wallets \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "11111111-1111-1111-1111-111111111111", "currency": "INR"}'
+
+# Create Wallet B
+curl -X POST http://localhost:8080/api/v1/wallets \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "22222222-2222-2222-2222-222222222222", "currency": "INR"}'
+```
+*Note the returned `id` (wallet UUIDs) from the responses. Let's assume Wallet A's id is `UUID_A` and Wallet B's id is `UUID_B`.*
 
 ### 2. Deposit Funds into Wallet A (With Idempotency Key)
 Generate a random UUID for the idempotency key (e.g., `8d227318-7b96-4b95-a8de-07a82c40c83d`).
@@ -575,6 +770,7 @@ To run tests for a specific module:
 
 ```bash
 mvn -pl wallet-core test
+```
  
  ---
  
@@ -598,7 +794,7 @@ mvn -pl wallet-core test
  - **Solution**: `DataIntegrityViolationException` is now caught and inspected. Idempotency key or user_id constraint violations return 409 Conflict.
  - **Files Changed**: `GlobalExceptionHandler.java`.
  
- #### JPA Entity Anti-Pattern Fix
+  #### JPA Entity Anti-Pattern Fix
  - **Issue**: Using `@Data` on JPA entities incorrectly includes lazy-loaded fields and versioning columns in equals/hashCode, breaking Hibernate proxy comparisons.
  - **Solution**: Replaced `@Data` with explicit `@Getter`, `@Setter`, `@ToString`, `@EqualsAndHashCode(of = "id")` to ensure equals/hashCode only considers the primary key.
  - **Files Changed**: `Wallet.java`, `Transaction.java`.
@@ -698,41 +894,59 @@ Comprehensive hardening of the API Gateway to add resilience patterns, stricter 
 - **Total Files Modified**: 6 (`pom.xml`, `application.yml`, `GatewayRoutesConfiguration.java`, `RateLimiterConfig.java`, `ApiGatewayProperties.java`, `IdempotencyHeaderValidationFilter.java`)
 - **New Files**: 5 (`FallbackController.java`, `SecurityHeadersFilter.java`, `ContentTypeValidationFilter.java`, `RedisReadinessIndicator.java`, `GatewayHardeningIntegrationTest.java`)
 - **Dependencies Added**: `spring-cloud-starter-circuitbreaker-reactor-resilience4j`, `spring-boot-starter-actuator`, `micrometer-registry-prometheus`
- 
- ### Testing the Hardening
- 
- #### Test Payload Hash Binding
- ```bash
- # First request with correct payload
- curl -X POST http://localhost:8080/api/v1/wallets/transfer \
-   -H "Content-Type: application/json" \
-   -H "Idempotency-Key: 12345678-1234-1234-1234-123456789012" \
-   -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 1000, "currency": "USD"}'
- 
- # Second request: modify amount but keep same idempotency key
- # Expected: HTTP 422 Unprocessable Entity (payload hash mismatch detected)
- curl -X POST http://localhost:8080/api/v1/wallets/transfer \
-   -H "Content-Type: application/json" \
-   -H "Idempotency-Key: 12345678-1234-1234-1234-123456789012" \
-   -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 2000, "currency": "USD"}'
- ```
- 
- #### Test Invalid Currency Code
- ```bash
- curl -X POST http://localhost:8080/api/v1/wallets \
-   -H "Content-Type: application/json" \
-   -d '{"userId": "some-uuid", "currency": "XYZ"}'
- # Expected: HTTP 400 Bad Request (invalid ISO-4217 code)
- ```
- 
- #### Test Maximum Amount Constraint
- ```bash
- curl -X POST http://localhost:8080/api/v1/wallets/transfer \
-   -H "Content-Type: application/json" \
-   -H "Idempotency-Key: some-uuid" \
-   -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 999999999999999, "currency": "USD"}'
- # Expected: HTTP 400 Bad Request (amount exceeds @Max constraint)
- ```
- 
- ---
+
+### Testing the Hardening
+
+#### Test Payload Hash Binding
+```bash
+# First request with correct payload
+curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 12345678-1234-1234-1234-123456789012" \
+  -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 1000, "currency": "USD"}'
+
+# Second request: modify amount but keep same idempotency key
+# Expected: HTTP 422 Unprocessable Entity (payload hash mismatch detected)
+curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 12345678-1234-1234-1234-123456789012" \
+  -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 2000, "currency": "USD"}'
 ```
+
+#### Test Invalid Currency Code
+```bash
+curl -X POST http://localhost:8080/api/v1/wallets \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "some-uuid", "currency": "XYZ"}'
+# Expected: HTTP 400 Bad Request (invalid ISO-4217 code)
+```
+
+#### Test Maximum Amount Constraint
+```bash
+curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: some-uuid" \
+  -d '{"senderWalletId": "UUID_A", "receiverWalletId": "UUID_B", "amount": 999999999999999, "currency": "USD"}'
+# Expected: HTTP 400 Bad Request (amount exceeds @Max constraint)
+```
+
+---
+
+## ⚙️ Phase 4: Configuration & Kafka Autowiring Fixes
+
+Recent improvements to the YAML configurations and the Kafka event-driven pipeline resolved critical startup issues.
+
+### YAML Configuration Clean-up (Duplicate Keys)
+- **Issue**: YAML configuration files (`application.yml` across `api-gateway`, `audit-worker`, and `wallet-core`) contained duplicate top-level keys (`spring:` and `flash:`). This would have caused SnakeYAML parser exceptions (`ComposerException`) at startup, or silently overwritten properties due to the "last-key-wins" rule.
+- **Solution**: Merged all duplicate configuration blocks under single unified root keys (`spring:` and `flash:`), ensuring correct formatting and nesting structure across all three modules.
+- **Files Changed**: `api-gateway/src/main/resources/application.yml`, `audit-worker/src/main/resources/application.yml`, `wallet-core/src/main/resources/application.yml`.
+
+### Kafka Template Autowiring Resolution
+- **Issue**: Declaring custom Kafka configuration beans in `SagaKafkaConfig.java` (specifically `sagaStringKafkaTemplate` of type `KafkaTemplate<String, String>` and `sagaProducerFactory`) implicitly disabled Spring Boot's automatic autowiring of default Kafka components due to `@ConditionalOnMissingBean` constraints. This prevented `WalletEventProducer` from finding the required `KafkaTemplate<String, TransactionEvent>` bean, crashing startup.
+- **Solution**: Explicitly defined the `ProducerFactory<String, TransactionEvent>` and `KafkaTemplate<String, TransactionEvent>` beans inside `KafkaConfig.java` to make them available in the application context. Corrected the misleading documentation in `SagaKafkaConfig.java` to explain this override mechanism.
+- **Files Changed**: `KafkaConfig.java`, `SagaKafkaConfig.java`.
+
+### Circular Dependency Fix in TransferSagaConsumer
+- **Issue**: A self-referential circular dependency (`transferSagaConsumer` -> `transferSagaConsumer`) prevented startup. This was caused by an incorrect import of the `@Lazy` annotation from the Hibernate Validator internal package (`org.hibernate.validator.internal.util.stereotypes.Lazy`), which Spring Boot failed to recognize during proxy initialization.
+- **Solution**: Replaced the incorrect import with the standard Spring context annotation (`org.springframework.context.annotation.Lazy`).
+- **Files Changed**: `TransferSagaConsumer.java`.

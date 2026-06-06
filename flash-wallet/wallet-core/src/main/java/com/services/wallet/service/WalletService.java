@@ -8,6 +8,7 @@ import com.services.wallet.config.KafkaConfig;
 import com.services.wallet.event.TransactionEvent;
 import com.services.wallet.exception.InsufficientBalanceException;
 import com.services.wallet.exception.WalletNotFoundException;
+import com.services.wallet.idempotency.IdempotencyService;
 import com.services.wallet.lock.LockManager;
 import com.services.wallet.model.Transaction;
 import com.services.wallet.model.TransactionStatus;
@@ -18,6 +19,7 @@ import com.services.wallet.repository.WalletRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
@@ -27,17 +29,20 @@ import java.time.Instant;
 import java.util.Locale;
 import java.util.UUID;
 
-
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class WalletService {
+
+    @Value("${wallet.transfer.mode:async}")
+    private String transferMode;
 
     private final WalletRepository walletRepository;
     private final TransactionRepository transactionRepository;
     private final LockManager lockManager;
     private final WalletEventProducer eventProducer;
     private final KafkaTemplate<String, TransactionEvent> kafkaTemplate;
+    private final IdempotencyService idempotencyService;
 
     @Autowired
     @Lazy
@@ -48,22 +53,57 @@ public class WalletService {
      * Guarantees locks are acquired outside of the JPA transaction boundary.
      */
     public TransferResponse transfer(TransferRequest request, String idempotencyKey) {
-        log.info("Initiating P2P transfer from wallet {} to wallet {} of amount {}", 
+        if ("sync".equalsIgnoreCase(transferMode)) {
+            return transferSync(request, idempotencyKey);
+        }
+        try {
+            // Try the standard async Saga route
+            return transferAsync(request, idempotencyKey);
+        } catch (Exception e) {
+            // If Kafka is down, or Saga initiation fails:
+            log.error("Saga flow failed (possibly Kafka outage). Falling back to synchronous double-lock pathway...",
+                    e);
+
+            // 1. Reset/fail the idempotency key state in Redis so the retry can run
+            idempotencyService.fail(idempotencyKey);
+
+            // 2. Fallback to synchronous double-lock execution
+            return transferSync(request, idempotencyKey);
+        }
+    }
+
+    public TransferResponse transferAsync(TransferRequest request, String idempotencyKey) {
+        log.info("Initiating P2P transfer from wallet {} to wallet {} of amount {}",
                 request.senderWalletId(), request.receiverWalletId(), request.amount());
         try {
-            // Step 1 only requires locking the sender's wallet.
-            // Receiver is locked during Step 2 in TransferSagaConsumer.
             return lockManager.executeWithLock(
                     request.senderWalletId(),
                     5000, // 5 seconds max wait to acquire locks
                     10000, // 10 seconds auto-lease guard
-                    () -> self.executeTransferTx(request, idempotencyKey)
-            );
+                    () -> self.executeTransferTx(request, idempotencyKey));
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
             log.error("Failed to execute transfer under distributed lock", e);
             throw new RuntimeException("Transaction failed due to lock/database issues", e);
+        }
+    }
+
+    public TransferResponse transferSync(TransferRequest request, String idempotencyKey) {
+        log.warn("KAFKA DOWN DETECTED OR CONFIG SWITCHED: Executing sync transfer with double locks");
+
+        try {
+            // Lock both sender and receiver wallets for atomic sync transfer
+            return lockManager.executeWithDoubleLocks(
+                    request.senderWalletId(),
+                    request.receiverWalletId(),
+                    5000,
+                    10_000,
+                    () -> self.executeSyncTransferTx(request, idempotencyKey));
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Sync transfer failed under double lock", e);
         }
     }
 
@@ -77,8 +117,7 @@ public class WalletService {
                     request.walletId(),
                     5000,
                     10000,
-                    () -> self.executeDepositTx(request, idempotencyKey)
-            );
+                    () -> self.executeDepositTx(request, idempotencyKey));
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
@@ -91,16 +130,21 @@ public class WalletService {
      * Saga Step 1: validates the transfer request, debits the sender, and
      * records the transaction as {@code DEBIT_COMPLETED}.
      *
-     * <p>A write-ahead record with status {@code INITIATED} is persisted before
+     * <p>
+     * A write-ahead record with status {@code INITIATED} is persisted before
      * any balance mutation. If the debit succeeds, the status is atomically
      * updated to {@code DEBIT_COMPLETED} in the same {@code @Transactional} commit.
      *
-     * <p>This method publishes a {@code TRANSFER_DEBIT_COMPLETED} event to
-     * {@code wallet.saga.events}. The {@link com.services.wallet.saga.TransferSagaConsumer}
+     * <p>
+     * This method publishes a {@code TRANSFER_DEBIT_COMPLETED} event to
+     * {@code wallet.saga.events}. The
+     * {@link com.services.wallet.saga.TransferSagaConsumer}
      * picks this up and performs Step 2 (receiver credit) or the compensating
      * transaction (sender re-credit) if the credit fails.
      *
-     * <p>The response status is {@code "DEBIT_COMPLETED"} — the transfer is not yet complete.
+     * <p>
+     * The response status is {@code "DEBIT_COMPLETED"} — the transfer is not yet
+     * complete.
      * Callers should poll {@code GET /api/v1/wallets/transactions/{transactionId}}
      * to determine the final outcome.
      */
@@ -110,17 +154,19 @@ public class WalletService {
         Wallet sender = walletRepository.findById(request.senderWalletId())
                 .orElseThrow(() -> new WalletNotFoundException("Sender wallet not found: " + request.senderWalletId()));
         Wallet receiver = walletRepository.findById(request.receiverWalletId())
-                .orElseThrow(() -> new WalletNotFoundException("Receiver wallet not found: " + request.receiverWalletId()));
+                .orElseThrow(
+                        () -> new WalletNotFoundException("Receiver wallet not found: " + request.receiverWalletId()));
 
         // Validate currencies match request
-        if (!sender.getCurrency().equalsIgnoreCase(request.currency()) || 
-            !receiver.getCurrency().equalsIgnoreCase(request.currency())) {
-            throw new IllegalArgumentException("Currency mismatch between wallets and request: expected " + request.currency());
+        if (!sender.getCurrency().equalsIgnoreCase(request.currency()) ||
+                !receiver.getCurrency().equalsIgnoreCase(request.currency())) {
+            throw new IllegalArgumentException(
+                    "Currency mismatch between wallets and request: expected " + request.currency());
         }
 
         // Check sufficient funds
         if (sender.getBalance() < request.amount()) {
-            log.warn("Transfer failed: Insufficient balance in sender wallet. Balance={}, Attempted={}", 
+            log.warn("Transfer failed: Insufficient balance in sender wallet. Balance={}, Attempted={}",
                     sender.getBalance(), request.amount());
             throw new InsufficientBalanceException("Insufficient balance in wallet: " + sender.getId());
         }
@@ -158,6 +204,7 @@ public class WalletService {
                 .eventType("TRANSFER_DEBIT_COMPLETED")
                 .timestamp(Instant.now())
                 .build();
+
         kafkaTemplate.send(KafkaConfig.SAGA_EVENTS_TOPIC, transaction.getId().toString(), sagaEvent);
 
         log.info("Saga Step 1 committed: transactionId={}, senderWalletId={}, amount={}, status=DEBIT_COMPLETED",
@@ -226,6 +273,52 @@ public class WalletService {
         log.info("Deposit transaction committed successfully: ID={}", transaction.getId());
 
         return mapToResponse(wallet);
+    }
+
+    @Transactional
+    public TransferResponse executeSyncTransferTx(TransferRequest request, String idempotencyKey) {
+        Wallet sender = walletRepository.findById(request.senderWalletId())
+                .orElseThrow(() -> new WalletNotFoundException("Sender wallet not found: " + request.senderWalletId()));
+        Wallet receiver = walletRepository.findById(request.receiverWalletId())
+                .orElseThrow(
+                        () -> new WalletNotFoundException("Receiver wallet not found: " + request.receiverWalletId()));
+
+        if (!sender.getCurrency().equalsIgnoreCase(request.currency()) ||
+                !receiver.getCurrency().equalsIgnoreCase(request.currency())) {
+            throw new IllegalArgumentException("Currency mismatch");
+        }
+
+        if (sender.getBalance() < request.amount()) {
+            throw new InsufficientBalanceException("Insufficient funds in sender wallet");
+        }
+
+        if (receiver.getBalance() > Long.MAX_VALUE - request.amount()) {
+            throw new IllegalArgumentException("Receiver balance overflow the guard");
+        }
+
+        Transaction transaction = Transaction.builder()
+                .id(UUID.randomUUID())
+                .idempotencyKey(idempotencyKey)
+                .senderWalletId(sender.getId())
+                .receiverWalletId(receiver.getId())
+                .amount(request.amount())
+                .status(TransactionStatus.COMPLETED)
+                .build();
+
+        transactionRepository.save(transaction);
+        sender.setBalance(sender.getBalance() - request.amount());
+        receiver.setBalance(receiver.getBalance() + request.amount());
+        walletRepository.save(sender);
+        walletRepository.save(receiver);
+
+        return TransferResponse.builder()
+                .transactionId(transaction.getId())
+                .senderWalletId(sender.getId())
+                .receiverWalletId(receiver.getId())
+                .amount(request.amount())
+                .status("COMPLETED")
+                .message("Synchronous transfer completed successfully.")
+                .build();
     }
 
     @Transactional
