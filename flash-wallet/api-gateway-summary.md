@@ -6,6 +6,57 @@ The **API Gateway** is the entry point for the Flash-Wallet microservices archit
 
 Here is the step-by-step lifecycle of an HTTP request as it passes through the `api-gateway`.
 
+### Filter Chain Processing Flow
+
+```mermaid
+flowchart TD
+    req([HTTP Request]) --> shf
+
+    subgraph WebFlux_Layer [Spring WebFlux WebFilter Chain]
+        shf[1. SecurityHeadersFilter<br/><i>(Order: MIN+1)</i>]:::webflux
+        fwh[2. FilteringWebHandler<br/><i>(Bridge into SCG)</i>]:::webflux
+        shf --> fwh
+    end
+
+    subgraph SCG_Layer [Spring Cloud Gateway GlobalFilter Chain]
+        cid[1. CorrelationIdFilter<br/><i>(Order: MIN+0)</i>]:::scg
+        alf[2. AccessLogFilter<br/><i>(Order: MIN+2)</i>]:::scg
+        ctv[3. ContentTypeValidationFilter<br/><i>(Order: MIN+4)</i>]:::scg
+        idf[4. IdempotencyHeaderValidationFilter<br/><i>(Order: MIN+10)</i>]:::scg
+        route[5. Routing to Downstream Service]:::external
+        
+        cid --> alf --> ctv --> idf --> route
+    end
+
+    fwh --> cid
+
+    classDef webflux fill:#e8f4fd,stroke:#1d8cf8,stroke-width:2px,color:#000;
+    classDef scg fill:#eafaf1,stroke:#2dcc70,stroke-width:2px,color:#000;
+    classDef external fill:#fbfcfc,stroke:#7f8c8d,stroke-width:2px,color:#333;
+
+    style WebFlux_Layer fill:#f7fbfe,stroke:#d0e7fc,stroke-width:1px;
+    style SCG_Layer fill:#f9fdfa,stroke:#dcf7e7,stroke-width:1px;
+
+    click shf "file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/SecurityHeadersFilter.java" "Open SecurityHeadersFilter"
+    click cid "file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/CorrelationIdFilter.java" "Open CorrelationIdFilter"
+    click alf "file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/AccessLogFilter.java" "Open AccessLogFilter"
+    click ctv "file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/ContentTypeValidationFilter.java" "Open ContentTypeValidationFilter"
+    click idf "file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/IdempotencyHeaderValidationFilter.java" "Open IdempotencyHeaderValidationFilter"
+```
+
+<details>
+<summary>🔍 <b>Click to inspect each filter's purpose and order</b></summary>
+
+| Filter | Order Value | Layer | Description |
+| :--- | :--- | :--- | :--- |
+| **[SecurityHeadersFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/SecurityHeadersFilter.java)** | `Integer.MIN_VALUE + 1` | Spring WebFlux WebFilter | Registers a callback to write security headers before committing response headers. |
+| **[CorrelationIdFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/CorrelationIdFilter.java)** | `Integer.MIN_VALUE + 0` | Spring Cloud Gateway GlobalFilter | Injects `X-Request-Id` UUID into the request context if not already present. |
+| **[AccessLogFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/AccessLogFilter.java)** | `Integer.MIN_VALUE + 2` | Spring Cloud Gateway GlobalFilter | Logs incoming request trace, method, path, and records latency. |
+| **[ContentTypeValidationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/ContentTypeValidationFilter.java)** | `Integer.MIN_VALUE + 4` | Spring Cloud Gateway GlobalFilter | Restricts incoming requests to `application/json` for POST/PUT/PATCH. |
+| **[IdempotencyHeaderValidationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/IdempotencyHeaderValidationFilter.java)** | `Integer.MIN_VALUE + 10` | Spring Cloud Gateway GlobalFilter | Enforces standard validation on mutating API requests (POST/PUT/PATCH/DELETE). |
+
+</details>
+
 ### Flow: Request Routing Pipeline
 
 ```mermaid
@@ -110,7 +161,7 @@ Below is an exhaustive breakdown of every file within the `api-gateway` service 
 
 - **`CorrelationIdFilter.java`**: A gateway filter factory that injects a unique `X-Request-Id` UUID into every incoming request (if not already present). This correlation ID is propagated downstream to all microservices and logs, enabling end-to-end request tracing and debugging.
 - **`AccessLogFilter.java`**: Records incoming request details (method, path, source IP, timestamp, request headers) at INFO level before forwarding to the downstream service. After receiving the response, it logs response status and elapsed time. Useful for traffic auditing and performance monitoring.
-- **`ContentTypeValidationFilter.java`**: Rejects POST/PUT/PATCH requests that do not carry `Content-Type: application/json` with a 415 Unsupported Media Type response. Runs at order `HIGHEST_PRECEDENCE + 8` — before the idempotency filter — so that invalid Content-Type is caught first. Saves wallet-core a deserialization round-trip and produces a uniform 415 from the gateway.
+- **`ContentTypeValidationFilter.java`**: Rejects POST/PUT/PATCH requests that do not carry `Content-Type: application/json` with a 415 Unsupported Media Type response. Runs at order `HIGHEST_PRECEDENCE + 4` — before the idempotency filter (+10) — so that invalid Content-Type is caught first. Saves wallet-core a deserialization round-trip and produces a uniform 415 from the gateway.
 - **`IdempotencyHeaderValidationFilter.java`**: Validates the `Idempotency-Key` header on all mutating requests (POST, PUT, PATCH, DELETE) to protected paths. Enforces a 128-character length cap to prevent header-stuffing attacks (even when `strictUuid=false`). When strict UUID mode is enabled, validates UUID format and rejects non-UUID keys with a 400 Bad Request response. This upstream check complements the downstream idempotency aspect in wallet-core.
 - **`SecurityHeadersFilter.java`**: A `WebFilter` (not a `GlobalFilter`) at the Spring WebFlux layer that injects security headers on every response using `beforeCommit()`. This ensures headers are applied to all responses including circuit-breaker fallbacks and error handler responses. Runs at `HIGHEST_PRECEDENCE + 1`. Headers injected: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on `/api/v1/wallets/**` paths), and `Strict-Transport-Security` (configurable via `flash.gateway.security.hsts-enabled`, off in dev).
 - **`RequestSizeFilter.java`**: Rejects requests whose `Content-Length` exceeds a configurable threshold (default 10 KB) with a 413 Payload Too Large response. This protects downstream services from memory exhaustion and DOS attacks.
