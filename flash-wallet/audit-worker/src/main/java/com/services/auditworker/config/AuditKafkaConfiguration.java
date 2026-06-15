@@ -5,6 +5,7 @@ import com.services.auditworker.exception.AuditEventValidationException;
 import com.services.auditworker.service.AuditDeadLetterRecoverer;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -76,7 +77,7 @@ public class AuditKafkaConfiguration {
         errorHandler.setCommitRecovered(true);
         errorHandler.setRetryListeners(new RetryListener() {
             @Override
-            public void failedDelivery(org.apache.kafka.clients.consumer.ConsumerRecord<?, ?> record,
+            public void failedDelivery(ConsumerRecord<?, ?> record,
                     Exception ex,
                     int deliveryAttempt) {
                 log.warn(
@@ -91,7 +92,7 @@ public class AuditKafkaConfiguration {
             }
 
             @Override
-            public void recoveryFailed(org.apache.kafka.clients.consumer.ConsumerRecord<?, ?> record,
+            public void recoveryFailed(ConsumerRecord<?, ?> record,
                     Exception original,
                     Exception failure) {
                 log.error(
