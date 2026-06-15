@@ -48,6 +48,6 @@ public class ContentTypeValidationFilter implements GlobalFilter, Ordered {
 
     @Override
     public int getOrder() {
-        return Ordered.HIGHEST_PRECEDENCE + 4; // Fifth in precedence
+        return Ordered.HIGHEST_PRECEDENCE + 2; // Runs third (in SCG GlobalFilter chain)
     }
 }
