@@ -13,14 +13,14 @@ flowchart TD
     req([HTTP Request]) --> shf
 
     subgraph WebFlux_Layer [Spring WebFlux WebFilter Chain]
-        shf["1. SecurityHeadersFilter<br/><i>(Order: MIN+1)</i>"]:::webflux
+        shf["1. SecurityHeadersFilter<br/><i>(Order: MIN+0)</i>"]:::webflux
         fwh["2. FilteringWebHandler<br/><i>(Bridge into SCG)</i>"]:::webflux
         shf --> fwh
     end
 
     subgraph SCG_Layer [Spring Cloud Gateway GlobalFilter Chain]
         cid["1. CorrelationIdFilter<br/><i>(Order: MIN+0)</i>"]:::scg
-        alf["2. AccessLogFilter<br/><i>(Order: MIN+5)</i>"]:::scg
+        alf["2. AccessLogFilter<br/><i>(Order: MIN+1)</i>"]:::scg
         ctv["3. ContentTypeValidationFilter<br/><i>(Order: MIN+2)</i>"]:::scg
         idf["4. IdempotencyHeaderValidationFilter<br/><i>(Order: MIN+3)</i>"]:::scg
         route["5. Routing to Downstream Service"]:::external
@@ -49,9 +49,9 @@ flowchart TD
 
 | Filter | Order Value | Layer | Description |
 | :--- | :--- | :--- | :--- |
-| **[SecurityHeadersFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/SecurityHeadersFilter.java)** | `Integer.MIN_VALUE + 1` | Spring WebFlux WebFilter | Different filter chain entirely. Registers a callback to write security headers before committing response headers. |
+| **[SecurityHeadersFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/SecurityHeadersFilter.java)** | `Integer.MIN_VALUE` | Spring WebFlux WebFilter | Runs first in WebFilter chain. Registers a callback to write security headers before committing response headers. |
 | **[CorrelationIdFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/CorrelationIdFilter.java)** | `Integer.MIN_VALUE` | Spring Cloud Gateway GlobalFilter | Runs first — generates `X-Request-Id` UUID into the request context if not already present. |
-| **[AccessLogFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/AccessLogFilter.java)** | `Integer.MIN_VALUE + 5` | Spring Cloud Gateway GlobalFilter | Runs second — logs incoming request trace, method, path, and records latency. |
+| **[AccessLogFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/AccessLogFilter.java)** | `Integer.MIN_VALUE + 1` | Spring Cloud Gateway GlobalFilter | Runs second — logs incoming request trace, method, path, and records latency. |
 | **[ContentTypeValidationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/ContentTypeValidationFilter.java)** | `Integer.MIN_VALUE + 2` | Spring Cloud Gateway GlobalFilter | Runs third — restricts incoming requests to `application/json` for POST/PUT/PATCH. |
 | **[IdempotencyHeaderValidationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/IdempotencyHeaderValidationFilter.java)** | `Integer.MIN_VALUE + 3` | Spring Cloud Gateway GlobalFilter | Runs fourth — enforces standard validation on mutating API requests (POST/PUT/PATCH/DELETE). |
 
@@ -163,7 +163,7 @@ Below is an exhaustive breakdown of every file within the `api-gateway` service 
 - **`AccessLogFilter.java`**: Records incoming request details (method, path, source IP, timestamp, request headers) at INFO level before forwarding to the downstream service. After receiving the response, it logs response status and elapsed time. Useful for traffic auditing and performance monitoring.
 - **`ContentTypeValidationFilter.java`**: Rejects POST/PUT/PATCH requests that do not carry `Content-Type: application/json` with a 415 Unsupported Media Type response. Runs at order `HIGHEST_PRECEDENCE + 2` — before the idempotency filter (+3) — so that invalid Content-Type is caught first. Saves wallet-core a deserialization round-trip and produces a uniform 415 from the gateway.
 - **`IdempotencyHeaderValidationFilter.java`**: Validates the `Idempotency-Key` header on all mutating requests (POST, PUT, PATCH, DELETE) to protected paths. Enforces a 128-character length cap to prevent header-stuffing attacks (even when `strictUuid=false`). When strict UUID mode is enabled, validates UUID format and rejects non-UUID keys with a 400 Bad Request response. This upstream check complements the downstream idempotency aspect in wallet-core.
-- **`SecurityHeadersFilter.java`**: A `WebFilter` (not a `GlobalFilter`) at the Spring WebFlux layer that injects security headers on every response using `beforeCommit()`. This ensures headers are applied to all responses including circuit-breaker fallbacks and error handler responses. Runs at `HIGHEST_PRECEDENCE + 1`. Headers injected: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on `/api/v1/wallets/**` paths), and `Strict-Transport-Security` (configurable via `flash.gateway.security.hsts-enabled`, off in dev).
+- **`SecurityHeadersFilter.java`**: A `WebFilter` (not a `GlobalFilter`) at the Spring WebFlux layer that injects security headers on every response using `beforeCommit()`. This ensures headers are applied to all responses including circuit-breaker fallbacks and error handler responses. Runs at `HIGHEST_PRECEDENCE` (first in WebFilter chain). Headers injected: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on `/api/v1/wallets/**` paths), and `Strict-Transport-Security` (configurable via `flash.gateway.security.hsts-enabled`, off in dev).
 - **`RequestSizeFilter.java`**: Rejects requests whose `Content-Length` exceeds a configurable threshold (default 10 KB) with a 413 Payload Too Large response. This protects downstream services from memory exhaustion and DOS attacks.
 
 ## 3. Exception Handling (`exception/`)
@@ -271,7 +271,7 @@ GET requests to wallet-core are retried up to 2 times on 5xx or connection error
 
 ## Security Headers
 
-The `SecurityHeadersFilter` (a `WebFilter` at `HIGHEST_PRECEDENCE + 1` using `beforeCommit()`) injects the following headers on every response — including circuit-breaker fallbacks and error handler responses:
+The `SecurityHeadersFilter` (a `WebFilter` at `HIGHEST_PRECEDENCE` using `beforeCommit()`) injects the following headers on every response — including circuit-breaker fallbacks and error handler responses:
 
 | Header | Value | Scope |
 |--------|-------|-------|

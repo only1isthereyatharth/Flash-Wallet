@@ -49,6 +49,6 @@ public class SecurityHeadersFilter implements WebFilter, Ordered {
 
     @Override
     public int getOrder() {
-        return Ordered.HIGHEST_PRECEDENCE + 1; // Second in precedence
+        return Ordered.HIGHEST_PRECEDENCE; // First in WebFilter chain (runs before all other WebFilters)
     }
 }

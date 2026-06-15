@@ -855,7 +855,7 @@ Comprehensive hardening of the API Gateway to add resilience patterns, stricter 
 - **Files Changed**: `GatewayRoutesConfiguration.java`.
 
 ### ✅ 3.3 Security Headers Response Filter
-- **What**: New `SecurityHeadersFilter` — a `WebFilter` (not `GlobalFilter`) at the Spring WebFlux layer using `beforeCommit()` to inject security headers on every response (including circuit-breaker fallbacks and error handler responses). Runs at `HIGHEST_PRECEDENCE + 1`. Headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on `/api/v1/wallets/**`), `Strict-Transport-Security` (configurable via `flash.gateway.security.hsts-enabled`, off in dev).
+- **What**: New `SecurityHeadersFilter` — a `WebFilter` (not `GlobalFilter`) at the Spring WebFlux layer using `beforeCommit()` to inject security headers on every response (including circuit-breaker fallbacks and error handler responses). Runs at `HIGHEST_PRECEDENCE`. Headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on `/api/v1/wallets/**`), `Strict-Transport-Security` (configurable via `flash.gateway.security.hsts-enabled`, off in dev).
 - **Files Changed**: `SecurityHeadersFilter.java` (NEW), `ApiGatewayProperties.java` (Security inner class), `application.yml`.
 
 ### ✅ 3.4 Method Allowlist Per Route
