@@ -13,17 +13,17 @@ flowchart TD
     req([HTTP Request]) --> shf
 
     subgraph WebFlux_Layer [Spring WebFlux WebFilter Chain]
-        shf[1. SecurityHeadersFilter<br/><i>(Order: MIN+1)</i>]:::webflux
-        fwh[2. FilteringWebHandler<br/><i>(Bridge into SCG)</i>]:::webflux
+        shf["1. SecurityHeadersFilter<br/><i>(Order: MIN+1)</i>"]:::webflux
+        fwh["2. FilteringWebHandler<br/><i>(Bridge into SCG)</i>"]:::webflux
         shf --> fwh
     end
 
     subgraph SCG_Layer [Spring Cloud Gateway GlobalFilter Chain]
-        cid[1. CorrelationIdFilter<br/><i>(Order: MIN+0)</i>]:::scg
-        alf[2. AccessLogFilter<br/><i>(Order: MIN+2)</i>]:::scg
-        ctv[3. ContentTypeValidationFilter<br/><i>(Order: MIN+4)</i>]:::scg
-        idf[4. IdempotencyHeaderValidationFilter<br/><i>(Order: MIN+10)</i>]:::scg
-        route[5. Routing to Downstream Service]:::external
+        cid["1. CorrelationIdFilter<br/><i>(Order: MIN+0)</i>"]:::scg
+        alf["2. AccessLogFilter<br/><i>(Order: MIN+2)</i>"]:::scg
+        ctv["3. ContentTypeValidationFilter<br/><i>(Order: MIN+4)</i>"]:::scg
+        idf["4. IdempotencyHeaderValidationFilter<br/><i>(Order: MIN+10)</i>"]:::scg
+        route["5. Routing to Downstream Service"]:::external
         
         cid --> alf --> ctv --> idf --> route
     end
