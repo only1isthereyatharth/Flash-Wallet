@@ -54,7 +54,8 @@ public class WalletService {
      */
     public TransferResponse transfer(TransferRequest request, String idempotencyKey) {
         if ("sync".equalsIgnoreCase(transferMode)) {
-            return transferSync(request, idempotencyKey);
+            // return transferSync(request, idempotencyKey); Sync needs to be removed
+            return null;
         }
         try {
             // Try the standard async Saga route

@@ -13,7 +13,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 @Component
-public class CorrelationIdFilter implements GlobalFilter, Ordered {
+public final class CorrelationIdFilter implements GlobalFilter, Ordered {
 
     public static final String HEADER_NAME = "X-Request-Id";
     public static final String REQUEST_ID_ATTRIBUTE = "gatewayRequestId";

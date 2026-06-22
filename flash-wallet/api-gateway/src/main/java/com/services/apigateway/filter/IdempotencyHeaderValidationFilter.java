@@ -23,7 +23,7 @@ import java.util.UUID;
 @Component
 @RequiredArgsConstructor
 @Slf4j
-public class IdempotencyHeaderValidationFilter implements GlobalFilter, Ordered {
+public final class IdempotencyHeaderValidationFilter implements GlobalFilter, Ordered {
 
     private static final List<HttpMethod> MUTATING_METHODS = List.of(
             HttpMethod.POST,

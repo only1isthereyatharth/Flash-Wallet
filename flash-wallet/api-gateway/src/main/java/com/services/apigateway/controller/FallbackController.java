@@ -30,6 +30,22 @@ public class FallbackController {
                 traceId));
     }
 
+    @RequestMapping(value = "/fallback/audit-worker", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Mono<GatewayErrorResponse> auditWorkerFallback(ServerWebExchange exchange) {
+        String traceId = resolveTraceId(exchange);
+        String path = exchange.getRequest().getURI().getRawPath();
+
+        exchange.getResponse().setStatusCode(HttpStatus.SERVICE_UNAVAILABLE);
+        exchange.getResponse().getHeaders().set(CorrelationIdFilter.HEADER_NAME, traceId);
+
+        return Mono.just(GatewayErrorResponse.of(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "Service Unavailable",
+                "The audit-worker service is currently unavailable. The circuit breaker is open. Please retry later.",
+                path,
+                traceId));
+    }
+
     private String resolveTraceId(ServerWebExchange exchange) {
         Object value = exchange.getAttribute(CorrelationIdFilter.REQUEST_ID_ATTRIBUTE);
         if (value instanceof String traceId && !traceId.isBlank()) {

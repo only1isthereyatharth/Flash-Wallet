@@ -11,26 +11,37 @@ This architecture bypasses traditional, heavy enterprise patterns (like Eureka) 
 ```
                   [ Client / API Consumer ]
                              │
-                             ▼ (HTTP REST with Idempotency-Key & X-Request-Id)
-                [ flash-api-gateway (Port 8080) ]
+                             │  Authorization: Bearer <JWT>
+                             ▼
+                     [ Keycloak IAM ]
+                     (JWT Issuer & RBAC)
                              │
-                             ▼ (HTTP — Internal Network Routing)
-                    [ flash-wallet-core ]
-                     │         │    ▲
-                     ▼ (SETNX) │    │ (Consume)
-                 [ Redis ]     │    └───────┐
-                     │         ▼            │
-                     │    [ Wallet Core DB ]│
-                     │                      │
-                     └─────────────► [ Kafka Topics ]
-                                  - wallet.saga.events (Saga)
-                                  - wallet.transaction.events (Audit)
-                                             │
-                                             ▼ (Async Kafka Consumer — NOT via Gateway)
-                                  [ flash-audit-worker ]
-                                             │
-                                             ▼ (Append-Only)
-                                        [ Audit DB ]
+                             │  JWT validated by Gateway
+                             ▼
+                [ flash-api-gateway (Port 8080) ]
+                   (OAuth2 Resource Server)
+                     │                  │
+                     │ X-User-Id        │ X-User-Id
+                     │ X-User-Roles     │ X-User-Roles
+                     │ X-User-Scopes    │ X-User-Scopes
+                     │ (JWT stripped)   │ (JWT stripped)
+                     ▼                  ▼
+            [ flash-wallet-core ]   [ flash-audit-worker ]
+             │         │    ▲        (GET /api/v1/audit/**)
+             ▼ (SETNX) │    │ (Consume)      │
+         [ Redis ]     │    └───────┐         ▼ (Append-Only + Query)
+             │         ▼            │    [ Audit DB + Redis Cache ]
+             │    [ Wallet Core DB ]│
+             │                      │
+             └─────────────► [ Kafka Topics ]
+                          - wallet.saga.events (Saga)
+                          - wallet.transaction.events (Audit)
+                                     │
+                                     ▼ (Async Kafka Consumer — NOT via Gateway)
+                          [ flash-audit-worker ]
+                                     │
+                                     ▼ (Append-Only)
+                                [ Audit DB ]
 ```
 
 ### Core Flow Sequence Diagram
@@ -50,8 +61,8 @@ sequenceDiagram
 
     Note over Client,Gateway: Step 1: Synchronous Debit & Saga Initiation
     Client->>Gateway: POST /api/v1/wallets/transfer (Idempotency-Key, Payload)
-    Note over Gateway: CorrelationIdFilter generates X-Request-Id<br/>ContentTypeValidationFilter rejects non-JSON mutating requests (415)<br/>IdempotencyHeaderValidationFilter verifies UUID + 128-char length cap<br/>Method allowlist rejects TRACE/CONNECT/OPTIONS (404)<br/>RateLimiterFilter checks per-client quota (externalized config)<br/>RequestSizeFilter rejects payloads > 10 KB<br/>CircuitBreaker short-circuits if wallet-core is failing (503 fallback)<br/>Retry filter retries GET on 5xx (max 2, jittered backoff)<br/>SecurityHeadersFilter (WebFilter) injects nosniff/DENY/no-referrer/HSTS via beforeCommit()
-    Gateway->>Core: Forwarded Request
+    Note over Gateway: OAuth2 Resource Server validates JWT (Keycloak issuer)<br/>KeyCloakRoleConverter extracts ROLE_* + SCOPE_* authorities<br/>SecurityConfig enforces role-based route access<br/>CorrelationIdFilter generates X-Request-Id<br/>ContentTypeValidationFilter rejects non-JSON mutating requests (415)<br/>IdempotencyHeaderValidationFilter verifies UUID + 128-char length cap<br/>UserContextPropagationFilter strips JWT, injects X-User-Id/Roles/Scopes<br/>Method allowlist rejects TRACE/CONNECT/OPTIONS (404)<br/>RateLimiterFilter checks per-client quota (externalized config)<br/>RequestSizeFilter rejects payloads > 10 KB<br/>CircuitBreaker short-circuits if wallet-core is failing (503 fallback)<br/>Retry filter retries GET on 5xx (max 2, jittered backoff)<br/>SecurityHeadersFilter (WebFilter) injects nosniff/DENY/no-referrer/HSTS via beforeCommit()
+    Gateway->>Core: Forwarded Request (X-User-Id, X-User-Roles, X-User-Scopes — no JWT)
     
     rect rgb(25, 25, 35)
         Note over Core: IdempotencyAspect intercepts request & computes SHA-256 payload hash
@@ -123,13 +134,66 @@ sequenceDiagram
     end
 ```
 
+### Security & Authorization Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Keycloak as Keycloak IAM
+    participant Gateway as flash-api-gateway
+    participant Core as flash-wallet-core
+    participant AuditAPI as flash-audit-worker (Query API)
+
+    Note over Client,Keycloak: Step 0: Obtain JWT from Keycloak
+    Client->>Keycloak: POST /realms/master/protocol/openid-connect/token (credentials)
+    Keycloak-->>Client: JWT (sub=userId, realm_access.roles=[CUSTOMER], scope=wallet:read wallet:write ...)
+
+    Note over Client,Gateway: Step 1: Authenticated Request to Gateway
+    Client->>Gateway: POST /api/v1/wallets/transfer (Authorization: Bearer JWT)
+
+    rect rgb(25, 30, 45)
+        Note over Gateway: Layer 1 — Perimeter Authentication & Authorization
+        Gateway->>Gateway: Validate JWT signature & issuer (Keycloak JWKS)
+        Gateway->>Gateway: KeyCloakRoleConverter extracts ROLE_CUSTOMER + SCOPE_wallet:write
+        Gateway->>Gateway: SecurityConfig checks hasAnyRole(CUSTOMER, SERVICE_CLIENT) — ✅ Pass
+        Gateway->>Gateway: UserContextPropagationFilter strips JWT, injects headers
+    end
+
+    Gateway->>Core: Forwarded Request (X-User-Id: uuid, X-User-Roles: CUSTOMER, X-User-Scopes: wallet:read,wallet:write)
+
+    rect rgb(25, 35, 30)
+        Note over Core: Layer 2 — Trusted Header Authentication
+        Core->>Core: TrustedHeaderAuthenticationFilter reconstructs Authentication (principal=userId, authorities=[ROLE_CUSTOMER, SCOPE_wallet:write])
+    end
+
+    rect rgb(35, 30, 25)
+        Note over Core: Layer 3 — Method-Level Authorization (@PreAuthorize)
+        Core->>Core: Check: hasAuthority(SCOPE_internal:debit)? ❌ No
+        Core->>Core: Check: hasAuthority(SCOPE_wallet:write)? ✅ Yes
+        Core->>Core: WalletOwnershipGuard.assertWalletOwnership(walletId, auth)
+        Core->>Core: Verify wallet.userId == auth.getName() (X-User-Id) — ✅ Owner
+    end
+
+    Core-->>Gateway: HTTP 202 Accepted
+    Gateway-->>Client: HTTP 202 Accepted
+
+    Note over Client,AuditAPI: Audit Query (ADMIN/AUDITOR only)
+    Client->>Gateway: GET /api/v1/audit?transactionId=... (Authorization: Bearer JWT)
+    Gateway->>Gateway: SecurityConfig checks hasAnyRole(ADMIN, AUDITOR) — ✅
+    Gateway->>AuditAPI: Forwarded Request (X-User-Id, X-User-Roles: ADMIN)
+    AuditAPI-->>Gateway: Paginated audit logs (Redis-cached)
+    Gateway-->>Client: HTTP 200 OK
+```
+
 ---
 
 ## 🛠️ Tech Stack & Infrastructure
 
 * **Backend Engine:** Java 21 / Spring Boot 4.0.6
+* **Identity & Access Management:** Keycloak (OAuth2/OpenID Connect — JWT-based authentication & RBAC)
 * **Message Broker:** Apache Kafka 4.x / KRaft mode (Event-driven asynchronous audit engine)
-* **Distributed Cache & Locking:** Redis (Redisson client for distributed locks and idempotency storage)
+* **Distributed Cache & Locking:** Redis (Redisson client for distributed locks, idempotency storage, and audit query caching)
 * **Primary Relational Databases:** PostgreSQL (Isolated databases following Database-per-Service pattern)
 * **Container Orchestration:** Docker & Docker Compose
 
@@ -141,9 +205,9 @@ The backend codebase is organized as a Maven multi-module project (defined in [p
 
 | Microservice | Port | Description | Configuration File |
 | :--- | :--- | :--- | :--- |
-| **[api-gateway](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway)** | `8080` | Perimeter API Gateway using Spring Cloud Gateway. Enforces CORS (explicit header allowlist), rate limiting (externalized config, hybrid key strategy), 10 KB request size limits, Content-Type validation (415 on non-JSON mutating requests), method allowlisting (rejects TRACE/CONNECT/OPTIONS), Idempotency-Key validation with 128-char length cap, security response headers via WebFilter `beforeCommit()` (nosniff, DENY, no-referrer, HSTS), Resilience4j circuit breaker with fallback, bounded retry (GET only), correlation trace IDs, actuator health probes (liveness + readiness gated on Redis), and Prometheus metrics. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/resources/application.yml) |
-| **[wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core)** | `8081` | Core Domain Service. Manages wallets, executes transfers via choreography-based saga, enforces payload-bound idempotency with SHA-256 hashing, validates ISO-4217 currency codes, and publishes transaction events to Kafka. Configuration policy (current): `application.yml`/env is the primary runtime source; Java config defaults may act as local/small-scale fallback if YAML binding is unavailable. Keep YAML and Java defaults synchronized when URLs/ports/broker endpoints change. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/resources/application.yml) |
-| **[audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker)** | `8082` | Compliance Audit Consumer. Consumes events asynchronously from Kafka, validates with strict Jackson deserialization, stores logs in JSONB format, and handles dead-letter recoveries. Configuration policy (current): `application.yml`/env is the primary runtime source; Java config defaults may act as local/small-scale fallback if YAML binding is unavailable. Keep YAML and Java defaults synchronized when URLs/ports/topic/endpoints change. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/resources/application.yml) |
+| **[api-gateway](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway)** | `8080` | Perimeter API Gateway using Spring Cloud Gateway. Acts as an **OAuth2 Resource Server** validating Keycloak JWTs. Enforces role-based route authorization via [SecurityConfig](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/security/SecurityConfig.java), propagates user identity downstream via [UserContextPropagationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/UserContextPropagationFilter.java) (`X-User-Id`, `X-User-Roles`, `X-User-Scopes` headers — JWT stripped before forwarding). Routes to both wallet-core and audit-worker with isolated circuit breakers. Also enforces CORS, rate limiting, 10 KB request size limits, Content-Type validation, method allowlisting, Idempotency-Key validation, security response headers, bounded retry, correlation trace IDs, and Prometheus metrics. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/resources/application.yml) |
+| **[wallet-core](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core)** | `8081` | Core Domain Service. Secured via [TrustedHeaderAuthenticationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/filter/TrustedHeaderAuthenticationFilter.java) that reconstructs `Authentication` from gateway-propagated headers. Uses `@PreAuthorize` with scope-based authorization and [WalletOwnershipGuard](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/service/WalletOwnershipGuard.java) for ownership enforcement. Manages wallets, executes transfers via choreography-based saga, enforces payload-bound idempotency with SHA-256 hashing, validates ISO-4217 currency codes, and publishes transaction events to Kafka. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/resources/application.yml) |
+| **[audit-worker](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker)** | `8082` | Compliance Audit Service. Now exposed via gateway HTTP route (`GET /api/v1/audit/**`) for querying audit logs and processing failures (ADMIN/AUDITOR roles only). Secured via [TrustedHeaderAuthenticationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/java/com/services/auditworker/filter/TrustedHeaderAuthenticationFilter.java). Includes Redis-backed caching (60s TTL) for query performance. Also consumes events asynchronously from Kafka, validates with strict Jackson deserialization, stores logs in JSONB format, and handles dead-letter recoveries. | [application.yml](file:///c:/Users/parth/Flash-Wallet/flash-wallet/audit-worker/src/main/resources/application.yml) |
 
 ---
 
@@ -204,16 +268,30 @@ In-progress states like "currently crediting" or "currently compensating" are **
 | `COMPENSATED` | Terminal rollback — sender refunded cleanly | `executeCompensationTx()` |
 | `FAILED` | Terminal error — compensation exhausted; manual intervention required | `SagaDltRecoverer` |
 
-### 8. Perimeter Security (Rate & Size Limiting, Security Headers)
-* Implemented Redis-backed rate limiting using Spring Cloud Gateway's `RequestRateLimiter`.
-* **Hybrid KeyResolver**: The [RateLimiterConfig](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/config/RateLimiterConfig.java) rate limits strictly by remote client IP address on auth paths, and checks client identifier headers (`X-Client-Id` / `X-Client`) with an IP fallback for other business endpoints. Rate-limit values (`replenishRate`, `burstCapacity`, `requestedTokens`) are externalized to `flash.gateway.rate-limit.*` properties with sensible defaults.
-* **Payload Size Constraints**: Limits request body size to **10 KB** at the gateway level using a `RequestSize` filter to defend against large-payload memory exhaustion vectors.
-* **Method Allowlist**: Each route restricts HTTP methods to only those the API exposes (GET/POST/PUT/PATCH/DELETE for wallet routes, GET-only for swagger/api-docs). Disallowed methods (TRACE, CONNECT, OPTIONS outside CORS preflight) are rejected at the gateway — they never reach wallet-core.
-* **Content-Type Allowlist**: POST/PUT/PATCH requests without `Content-Type: application/json` are rejected at the gateway with 415, saving wallet-core a deserialization round-trip.
-* **Idempotency-Key Length Cap**: Even when `strictUuid=false`, header length is capped at 128 characters to prevent header-stuffing attacks.
-* **Tighter CORS**: `allowedHeaders` uses an explicit allowlist (`Content-Type`, `Idempotency-Key`, `X-Request-Id`, `X-Client-Id`, `X-Client`, `Authorization`) instead of `*`. `allowCredentials=false`.
-* **Security Response Headers**: A `WebFilter`-based `SecurityHeadersFilter` (using `beforeCommit()` at the WebFlux layer) injects `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on wallet paths), and `Strict-Transport-Security` (configurable, off in dev). Because it operates at the WebFlux layer, headers are applied to all responses including circuit-breaker fallbacks and error handler responses.
-* **Configuration Source Policy (Current)**: For local runs and small-scale product use, API gateway settings are primarily configured via `application.yml` (and environment overrides), while `ApiGatewayProperties` retains Java-level fallback defaults for resiliency in minimal environments. This means if YAML binding fails or is absent, static defaults may take effect. Team rule: when changing service URLs or ports, update both `application.yml` and corresponding defaults in `ApiGatewayProperties` to prevent configuration drift.
+### 8. Perimeter Security (Authentication, Authorization, Rate & Size Limiting)
+* **OAuth2/JWT Authentication**: The API gateway is an OAuth2 Resource Server that validates every request's `Authorization: Bearer <JWT>` against the Keycloak JWKS endpoint. Invalid or expired tokens are rejected with `401 Unauthorized` before any downstream processing. Configured via `spring.security.oauth2.resourceserver.jwt.issuer-uri`.
+* **Role-Based Route Authorization**: [SecurityConfig](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/security/SecurityConfig.java) enforces per-route role checks at the perimeter. The [KeyCloakRoleConverter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/config/KeyCloakRoleConverter.java) extracts both roles (from `realm_access.roles`) and scopes (from `scope` claim) into Spring Security authorities.
+
+  | Route Pattern | Allowed Roles | Purpose |
+  |---|---|---|
+  | `/swagger-ui/**`, `/v3/api-docs/**`, `/actuator/health/**` | Public | Documentation & health probes |
+  | `/actuator/**` | ADMIN | Sensitive metrics/actuator endpoints |
+  | `GET /api/v1/audit/failures` | ADMIN | System failure tracking |
+  | `GET /api/v1/audit/**` | ADMIN, AUDITOR | Compliance audit logs |
+  | `POST /wallets/deposit`, `POST /wallets/transfer` | CUSTOMER, SERVICE_CLIENT | Financial mutations |
+  | `GET /wallets/transactions/**` | All 4 roles | Transaction polling |
+  | `GET /wallets/**` | All 4 roles | Wallet queries |
+  | `anyExchange()` | Authenticated | Catch-all security net |
+
+* **User Context Propagation**: After JWT validation, the [UserContextPropagationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/UserContextPropagationFilter.java) extracts `sub` → `X-User-Id`, roles → `X-User-Roles`, scopes → `X-User-Scopes`, and **strips the `Authorization` header** before forwarding to downstream services.
+* **Redis-backed Rate Limiting**: Uses Spring Cloud Gateway's `RequestRateLimiter` with a [hybrid KeyResolver](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/config/RateLimiterConfig.java) (IP-based for auth paths, client identifier headers with IP fallback for business endpoints).
+* **Payload Size Constraints**: Limits request body size to **10 KB** at the gateway level using a `RequestSize` filter.
+* **Method Allowlist**: Each route restricts HTTP methods via route predicates. Disallowed methods are rejected at the gateway.
+* **Content-Type Allowlist**: POST/PUT/PATCH requests without `Content-Type: application/json` are rejected at the gateway with 415.
+* **Idempotency-Key Length Cap**: Even when `strictUuid=false`, header length is capped at 128 characters.
+* **Tighter CORS**: `allowedHeaders` uses an explicit allowlist (`Content-Type`, `Idempotency-Key`, `X-Request-Id`, `X-Client-Id`, `X-Client`, `Authorization`) instead of `*`.
+* **Security Response Headers**: A `WebFilter`-based `SecurityHeadersFilter` injects `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (on wallet paths), and `Strict-Transport-Security` (configurable).
+* **Configuration Source Policy (Current)**: `application.yml` (with env overrides) is the primary source; `ApiGatewayProperties` retains Java-level fallback defaults.
 
 ### 9. Gateway Resilience (Circuit Breaker & Bounded Retry)
 * **Circuit Breaker**: The wallet-core route is protected by a Resilience4j circuit breaker. When downstream failures exceed the configured threshold (default 50% failure rate over a sliding window of 10 calls), the circuit opens and subsequent requests receive a 503 JSON response from the fallback endpoint immediately — protecting wallet-core from cascading load during outages. Configurable via `resilience4j.circuitbreaker.*` properties and feature-flagged via `flash.gateway.resilience.circuit-breaker.enabled`.
@@ -221,9 +299,42 @@ In-progress states like "currently crediting" or "currently compensating" are **
 * **Actuator Health Probes**: Kubernetes-ready liveness and readiness probes at `/actuator/health/liveness` and `/actuator/health/readiness`. Readiness fails until Redis (rate-limit backing store) is reachable via a custom `RedisReadinessIndicator`.
 * **Prometheus Metrics**: Exposed at `/actuator/prometheus`. Spring Cloud Gateway's built-in `gateway.requests` Micrometer timer provides per-route latency, status code, and outcome dimensions. Only health, prometheus, and metrics endpoints are exposed — sensitive endpoints (`/env`, `/heapdump`) are not.
 
-### 9. Strict Deserialization Boundaries
+### 10. Strict Deserialization Boundaries
 * Jackson ObjectMappers are globally configured by Spring Boot 4.x with `DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES` enabled by default, immediately rejecting malformed requests with unrecognized fields.
 * Polymorphic deserialization risks are minimized through Spring Boot's autoconfiguration defaults and standard Jackson type-safety patterns, preventing remote code execution vulnerabilities.
+
+### 11. Authentication & Authorization (Gateway-as-Trust-Boundary)
+The system implements a **3-layer security model** where the gateway is the sole trust boundary and downstream services rely on propagated headers:
+
+* **Layer 1 — Perimeter (API Gateway)**: Keycloak JWT validation + role-based route protection. The [KeyCloakRoleConverter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/config/KeyCloakRoleConverter.java) extracts both Keycloak roles (`realm_access.roles` → `ROLE_*`) and OAuth2 scopes (`scope` claim → `SCOPE_*`) into Spring Security authorities. The [UserContextPropagationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/api-gateway/src/main/java/com/services/apigateway/filter/UserContextPropagationFilter.java) strips the JWT and injects `X-User-Id` (JWT `sub` claim), `X-User-Roles`, and `X-User-Scopes` headers.
+* **Layer 2 — Downstream Authentication**: Both `wallet-core` and `audit-worker` use a [TrustedHeaderAuthenticationFilter](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/filter/TrustedHeaderAuthenticationFilter.java) (a `OncePerRequestFilter`) that reconstructs a `UsernamePasswordAuthenticationToken` from the `X-User-*` headers and populates the `SecurityContextHolder`. This makes `@PreAuthorize`, `Authentication` injection, and `auth.getName()` work seamlessly.
+* **Layer 3 — Method-Level Authorization**: `@EnableMethodSecurity` enables SpEL-based `@PreAuthorize` checks on controller methods. The [WalletOwnershipGuard](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/service/WalletOwnershipGuard.java) bean provides ownership verification methods (`assertWalletOwnership`, `assertUserIdMatch`, `assertTransactionIdMatch`) used in SpEL expressions.
+
+**4 Roles**: `CUSTOMER`, `ADMIN`, `AUDITOR`, `SERVICE_CLIENT`
+
+**Scope Taxonomy** (assigned via Keycloak client scopes):
+| Scope | Purpose |
+|---|---|
+| `wallet:read` | View own wallet |
+| `wallet:read_all` | View any wallet (bypasses ownership) |
+| `wallet:write` | Deposit/transfer (own wallet) |
+| `transaction:read` | View own transactions |
+| `transaction:read_all` | View any transaction (bypasses ownership) |
+| `internal:debit` | Service-to-service privileged debit |
+| `internal:credit` | Service-to-service privileged credit |
+
+**Authorization Pattern**: Every controller endpoint uses `@PreAuthorize` with the pattern: `hasAuthority('SCOPE_<elevated>') OR (hasAuthority('SCOPE_<standard>') AND @walletOwnershipGuard.<check>(...))`. Elevated scopes bypass ownership checks; standard scopes require ownership verification.
+
+**Gateway Filter Execution Order**:
+| Order | Filter | Type |
+|---|---|---|
+| `HIGHEST_PRECEDENCE` | `CorrelationIdFilter` | GlobalFilter |
+| `HIGHEST_PRECEDENCE + 1` | `AccessLogFilter` | GlobalFilter |
+| `HIGHEST_PRECEDENCE + 2` | `ContentTypeValidationFilter` | GlobalFilter |
+| `HIGHEST_PRECEDENCE + 3` | `IdempotencyHeaderValidationFilter` | GlobalFilter |
+| `HIGHEST_PRECEDENCE + 4` | `UserContextPropagationFilter` | GlobalFilter |
+| `HIGHEST_PRECEDENCE` (WebFilter) | `SecurityHeadersFilter` | WebFilter |
+| `LOWEST_PRECEDENCE` | `NotFoundResponseWebFilter` | WebFilter |
 
 ---
 
@@ -384,34 +495,18 @@ This UI compiles all endpoints, payloads, HTTP responses, and validation constra
 
 ## 📡 REST API Reference
 
-All write operations should be routed through `flash-api-gateway` on port `8080`.
+All operations require a valid **Keycloak JWT** in the `Authorization: Bearer <token>` header. All write operations should be routed through `flash-api-gateway` on port `8080`.
 
-### 1. Create Wallet
-* **Endpoint:** `POST /api/v1/wallets`
-* **Description:** Creates a new digital wallet for a user.
-* **Request Payload (`application/json`):**
-  ```json
-  {
-    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
-    "currency": "INR"
-  }
-  ```
-* **Response Payload (`201 Created`):**
-  ```json
-  {
-    "id": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
-    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
-    "balance": 0,
-    "currency": "INR",
-    "updatedAt": "2026-05-24T08:00:00Z"
-  }
-  ```
+### 1. Wallet Provisioning (Automatic)
+* **Note:** Wallet creation is no longer a manual REST endpoint. Wallets are provisioned **automatically** when a user registers in Keycloak. The registration event triggers an async flow via Kafka that creates the wallet in `wallet-core`.
+* To verify your wallet was provisioned, use `GET /api/v1/wallets/user/{userId}` with your Keycloak user UUID.
 
 ---
 
 ### 2. Deposit Funds
 * **Endpoint:** `POST /api/v1/wallets/deposit`
 * **Headers:** 
+  * `Authorization: Bearer <JWT>` (Required)
   * `Idempotency-Key` (UUID, Required)
 * **Request Payload (`application/json`):**
   ```json
@@ -438,6 +533,7 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
 ### 3. P2P Wallet-to-Wallet Transfer
 * **Endpoint:** `POST /api/v1/wallets/transfer`
 * **Headers:** 
+  * `Authorization: Bearer <JWT>` (Required)
   * `Idempotency-Key` (UUID, Required)
 * **Request Payload (`application/json`):**
   ```json
@@ -464,6 +560,8 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
 
 ### 4. Poll Transaction Status
 * **Endpoint:** `GET /api/v1/wallets/transactions/{transactionId}`
+* **Headers:** 
+  * `Authorization: Bearer <JWT>` (Required)
 * **Description:** Polls the current status of an initiated P2P transfer transaction.
 * **Response Payload (`200 OK`):**
   ```json
@@ -484,6 +582,8 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
 
 ### 5. Fetch Wallet Details
 * **Endpoint:** `GET /api/v1/wallets/{walletId}`
+* **Headers:** 
+  * `Authorization: Bearer <JWT>` (Required)
 * **Response Payload (`200 OK`):**
   ```json
   {
@@ -499,6 +599,8 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
 
 ### 6. Fetch Wallet by User ID
 * **Endpoint:** `GET /api/v1/wallets/user/{userId}`
+* **Headers:** 
+  * `Authorization: Bearer <JWT>` (Required)
 * **Response Payload (`200 OK`):**
   Same schema format as the general fetch endpoint.
 
@@ -508,219 +610,19 @@ All write operations should be routed through `flash-api-gateway` on port `8080`
 
 Ensure your application is running, and try these verification steps. We'll use `curl` to test the full lifecycle:
 
-### 1. Create Wallet A and Wallet B
+### 1. Register Users in Keycloak
+Obtain tokens for two different users (User A and User B) from Keycloak. The registration will automatically provision `UUID_A` and `UUID_B` in `wallet-core`.
 ```bash
-# Create Wallet A
-curl -X POST http://localhost:8080/api/v1/wallets \
-  -H "Content-Type: application/json" \
-  -d '{"userId": "11111111-1111-1111-1111-111111111111", "currency": "INR"}'
-
-# Create Wallet B
-curl -X POST http://localhost:8080/api/v1/wallets \
-  -H "Content-Type: application/json" \
-  -d '{"userId": "22222222-2222-2222-2222-222222222222", "currency": "INR"}'
+# Export the tokens as environment variables
+export TOKEN_A="eyJhbGci..."
+export TOKEN_B="eyJhbGci..."
 ```
-*Note the returned `id` (wallet UUIDs) from the responses. Let's assume Wallet A's id is `UUID_A` and Wallet B's id is `UUID_B`.*
-* **postgres-db**: `5432`
-* **redis**: `6379`
-* **kafka**: `9092` / `29092`
-
----
-
-### Option B: Run Backing Services in Docker & Microservices Locally
-
-Use this method when actively debugging or developing the Java source code locally.
-
-#### 1. Spin up only the Database & Broker infrastructure
-Start only the backing dependencies in the background:
-```bash
-docker-compose up -d postgres-db redis kafka
-```
-This boots Postgres (initializes databases using [init.sql](file:///c:/Users/parth/Flash-Wallet/postgres-init/init.sql)), Redis, and Kafka.
-
-#### 2. Build the Maven Project
-Package all modules:
-```bash
-cd flash-wallet
-mvn clean install -DskipTests
-```
-
-#### 3. Run each service on your local host
-Open three terminal windows inside the `flash-wallet` directory:
-
-* **Terminal 1: Start `api-gateway`**
-  ```bash
-  cd api-gateway
-  mvn spring-boot:run
-  ```
-* **Terminal 2: Start `wallet-core`**
-  ```bash
-  cd wallet-core
-  mvn spring-boot:run
-  ```
-* **Terminal 3: Start `audit-worker`**
-  ```bash
-  cd audit-worker
-  mvn spring-boot:run
-  ```
-
-Now the gateway is exposed on `http://localhost:8080`, reverse-proxying requests to `wallet-core` on port `8081`.
-
-## 📖 Swagger UI (Interactive API Documentation)
-
-Once the `api-gateway` and `wallet-core` services are running, you can access the interactive Swagger UI and OpenAPI documentation to test all endpoints:
-
-* **Swagger UI URL:** [http://localhost:8080/swagger-ui/index.html](http://localhost:8080/swagger-ui/index.html)
-* **Raw OpenAPI JSON Spec:** [http://localhost:8080/v3/api-docs](http://localhost:8080/v3/api-docs)
-
-This UI compiles all endpoints, payloads, HTTP responses, and validation constraints dynamically from [OpenApiConfig.java](file:///c:/Users/parth/Flash-Wallet/flash-wallet/wallet-core/src/main/java/com/services/wallet/config/OpenApiConfig.java). You can execute requests directly through the gateway (using port `8080`) by selecting it from the server drop-down menu in Swagger UI.
-
----
-
-## 📡 REST API Reference
-
-All write operations should be routed through `flash-api-gateway` on port `8080`.
-
-### 1. Create Wallet
-* **Endpoint:** `POST /api/v1/wallets`
-* **Description:** Creates a new digital wallet for a user.
-* **Request Payload (`application/json`):**
-  ```json
-  {
-    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
-    "currency": "INR"
-  }
-  ```
-* **Response Payload (`201 Created`):**
-  ```json
-  {
-    "id": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
-    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
-    "balance": 0,
-    "currency": "INR",
-    "updatedAt": "2026-05-24T08:00:00Z"
-  }
-  ```
-
----
-
-### 2. Deposit Funds
-* **Endpoint:** `POST /api/v1/wallets/deposit`
-* **Headers:** 
-  * `Idempotency-Key` (UUID, Required)
-* **Request Payload (`application/json`):**
-  ```json
-  {
-    "walletId": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
-    "amount": 50000,
-    "currency": "INR"
-  }
-  ```
-  *(Note: `50000` is 500.00 INR stored in Paisa)*
-* **Response Payload (`200 OK`):**
-  ```json
-  {
-    "id": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
-    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
-    "balance": 50000,
-    "currency": "INR",
-    "updatedAt": "2026-05-24T08:05:00Z"
-  }
-  ```
-
----
-
-### 3. P2P Wallet-to-Wallet Transfer
-* **Endpoint:** `POST /api/v1/wallets/transfer`
-* **Headers:** 
-  * `Idempotency-Key` (UUID, Required)
-* **Request Payload (`application/json`):**
-  ```json
-  {
-    "senderWalletId": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
-    "receiverWalletId": "a1811e5c-7d9a-4c28-98e3-5a0d3f82b7db",
-    "amount": 15000,
-    "currency": "INR"
-  }
-  ```
-* **Response Payload (`202 Accepted`):**
-  ```json
-  {
-    "transactionId": "b6a3b2cb-20c2-4876-b633-5c8e2bd06a74",
-    "senderWalletId": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
-    "receiverWalletId": "a1811e5c-7d9a-4c28-98e3-5a0d3f82b7db",
-    "amount": 15000,
-    "status": "DEBIT_COMPLETED",
-    "message": "Transfer initiated. Use the transactionId to poll for the final status."
-  }
-  ```
-
----
-
-### 4. Poll Transaction Status
-* **Endpoint:** `GET /api/v1/wallets/transactions/{transactionId}`
-* **Description:** Polls the current status of an initiated P2P transfer transaction.
-* **Response Payload (`200 OK`):**
-  ```json
-  {
-    "transactionId": "b6a3b2cb-20c2-4876-b633-5c8e2bd06a74",
-    "status": "COMPLETED"
-  }
-  ```
-  | Status | Meaning |
-  |---|---|
-  | `INITIATED` | Transaction record created, no money moved yet |
-  | `DEBIT_COMPLETED` | Sender debited, awaiting receiver credit (in-flight saga) |
-  | `COMPLETED` | Terminal success — both debit and credit committed |
-  | `COMPENSATED` | Terminal rollback — sender refunded cleanly |
-  | `FAILED` | Terminal error — compensation exhausted, manual intervention required |
-
----
-
-### 5. Fetch Wallet Details
-* **Endpoint:** `GET /api/v1/wallets/{walletId}`
-* **Response Payload (`200 OK`):**
-  ```json
-  {
-    "id": "e2d83b9d-4786-4f4d-b94f-40c26887556f",
-    "userId": "d748f2fa-b7d6-444a-9b16-bb7c9db8de75",
-    "balance": 35000,
-    "currency": "INR",
-    "updatedAt": "2026-05-24T08:10:00Z"
-  }
-  ```
-
----
-
-### 6. Fetch Wallet by User ID
-* **Endpoint:** `GET /api/v1/wallets/user/{userId}`
-* **Response Payload (`200 OK`):**
-  Same schema format as the general fetch endpoint.
-
----
-
-## 🧪 End-to-End Verification & API Testing
-
-Ensure your application is running, and try these verification steps. We'll use `curl` to test the full lifecycle:
-
-### 1. Create Wallet A and Wallet B
-```bash
-# Create Wallet A
-curl -X POST http://localhost:8080/api/v1/wallets \
-  -H "Content-Type: application/json" \
-  -d '{"userId": "11111111-1111-1111-1111-111111111111", "currency": "INR"}'
-
-# Create Wallet B
-curl -X POST http://localhost:8080/api/v1/wallets \
-  -H "Content-Type: application/json" \
-  -d '{"userId": "22222222-2222-2222-2222-222222222222", "currency": "INR"}'
-```
-*Note the returned `id` (wallet UUIDs) from the responses. Let's assume Wallet A's id is `UUID_A` and Wallet B's id is `UUID_B`.*
 
 ### 2. Deposit Funds into Wallet A (With Idempotency Key)
 Generate a random UUID for the idempotency key (e.g., `8d227318-7b96-4b95-a8de-07a82c40c83d`).
 ```bash
 curl -X POST http://localhost:8080/api/v1/wallets/deposit \
+  -H "Authorization: Bearer $TOKEN_A" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: 8d227318-7b96-4b95-a8de-07a82c40c83d" \
   -d '{"walletId": "<UUID_A>", "amount": 100000, "currency": "INR"}'
@@ -737,6 +639,7 @@ Now, send a request while a previous request with the same key is still processi
 ### 4. Perform P2P Transfer (Wallet A -> Wallet B)
 ```bash
 curl -X POST http://localhost:8080/api/v1/wallets/transfer \
+  -H "Authorization: Bearer $TOKEN_A" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: f2d58bf5-4089-4b68-b80c-7b1981bdeebf" \
   -d '{"senderWalletId": "<UUID_A>", "receiverWalletId": "<UUID_B>", "amount": 40000, "currency": "INR"}'
@@ -745,16 +648,18 @@ curl -X POST http://localhost:8080/api/v1/wallets/transfer \
 
 ### 5. Poll Transaction Status
 ```bash
-curl http://localhost:8080/api/v1/wallets/transactions/<transactionId>
+curl http://localhost:8080/api/v1/wallets/transactions/<transactionId> \
+  -H "Authorization: Bearer $TOKEN_A"
 ```
 * **Expected Result:** HTTP `200 OK` with status `COMPLETED`. Verify that Wallet B is now credited with `40000`.
 
 ### 6. Verify Asynchronous Compliance Logging
-Query the `audit_worker_db` to check if Kafka successfully streamed and processed the event:
+Query the HTTP endpoint on the gateway to fetch audit logs (Requires ADMIN or AUDITOR role):
 ```bash
-docker exec -it postgres-db psql -U postgres -d audit_worker_db -c "SELECT * FROM audit_logs;"
+curl http://localhost:8080/api/v1/audit?transactionId=<transactionId> \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
-* **Expected Result:** A new log record corresponding to the transfer transaction ID exists with the JSON payload.
+* **Expected Result:** Paginated audit log records corresponding to the transfer transaction ID.
 
 ---
 
@@ -950,3 +855,20 @@ Recent improvements to the YAML configurations and the Kafka event-driven pipeli
 - **Issue**: A self-referential circular dependency (`transferSagaConsumer` -> `transferSagaConsumer`) prevented startup. This was caused by an incorrect import of the `@Lazy` annotation from the Hibernate Validator internal package (`org.hibernate.validator.internal.util.stereotypes.Lazy`), which Spring Boot failed to recognize during proxy initialization.
 - **Solution**: Replaced the incorrect import with the standard Spring context annotation (`org.springframework.context.annotation.Lazy`).
 - **Files Changed**: `TransferSagaConsumer.java`.
+
+---
+
+## 🔐 Phase 5: OAuth2/Keycloak Security & RBAC (Branch: Feature/OAuth2-Secuirty-Implementation)
+
+### ✅ 5.1 OAuth2 Resource Server (API Gateway)
+### ✅ 5.2 KeyCloak Role & Scope Converter  
+### ✅ 5.3 User Context Propagation Filter
+### ✅ 5.4 Trusted Header Authentication (wallet-core & audit-worker)
+### ✅ 5.5 Method-Level Security & Ownership Guards (wallet-core)
+### ✅ 5.6 Audit Query API & Gateway Routing
+### ✅ 5.7 Redis Caching for Audit Queries
+
+### Summary of Phase 5 Changes
+- Total Files Modified: 20
+- New Files: 11
+- Dependencies Added: spring-boot-starter-security, spring-security-oauth2-resource-server, spring-security-oauth2-jose (gateway); spring-boot-starter-security (wallet-core, audit-worker); spring-boot-starter-cache, spring-boot-starter-data-redis, spring-boot-starter-web (audit-worker)

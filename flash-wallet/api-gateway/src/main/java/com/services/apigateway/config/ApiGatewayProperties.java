@@ -28,6 +28,9 @@ public class ApiGatewayProperties {
     public static class Services {
         @NotBlank
         private String walletCoreUri = "http://localhost:8081";
+
+        @NotBlank
+        private String auditWorkerUri = "http://localhost:8082";
     }
 
     @Data

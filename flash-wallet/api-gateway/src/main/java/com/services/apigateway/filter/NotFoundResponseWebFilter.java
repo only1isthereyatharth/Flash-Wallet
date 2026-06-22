@@ -22,7 +22,7 @@ import java.util.UUID;
 @Component
 @RequiredArgsConstructor
 @Slf4j
-public class NotFoundResponseWebFilter implements WebFilter, Ordered {
+public final class NotFoundResponseWebFilter implements WebFilter, Ordered {
 
     private final ObjectMapper objectMapper;
 

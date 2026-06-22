@@ -6,7 +6,7 @@
     <parent>
         <groupId>com.services</groupId>
         <artifactId>flash-wallet</artifactId>
-        <version>0.0.1-SNAPSHOT</version> 
+        <version>0.0.1-SNAPSHOT</version>
     </parent>
 
     <groupId>com.services</groupId>
@@ -17,6 +17,10 @@
     </properties>
 
     <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>

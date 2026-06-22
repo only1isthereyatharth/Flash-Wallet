@@ -17,7 +17,7 @@ import java.util.Objects;
 
 @Component
 @Slf4j
-public class ContentTypeValidationFilter implements GlobalFilter, Ordered {
+public final class ContentTypeValidationFilter implements GlobalFilter, Ordered {
 
     private static final List<HttpMethod> MUTATING_METHODS = List.of(
             HttpMethod.POST,

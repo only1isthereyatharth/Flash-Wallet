@@ -10,6 +10,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -24,13 +26,9 @@ public class WalletController {
 
     private final WalletService walletService;
     private final TransactionRepository transactionRepository;
-
-    @PostMapping
-    public ResponseEntity<WalletResponse> createWallet(@RequestBody @Valid CreateWalletRequest request) {
-        log.info("REST: Request to create wallet for user: {}", request.userId());
-        WalletResponse response = walletService.createWallet(request.userId(), request.currency());
-        return ResponseEntity.status(HttpStatus.CREATED).body(response);
-    }
+    /**
+     * No need for manual wallet creation since wallet creation is triggered automatically when user registers
+     */
 
     /**
      * Initiates a P2P transfer via the Saga pattern.
@@ -42,9 +40,14 @@ public class WalletController {
      */
     @PostMapping("/transfer")
     @Idempotent
+    @PreAuthorize(
+        "hasAuthority('SCOPE_internal:debit') or " +
+        "(hasAuthority('SCOPE_wallet:write') and @walletOwnershipGuard.assertWalletOwnership(#request.senderWalletId(), #auth))"
+    )
     public ResponseEntity<TransferResponse> transfer(
             @RequestBody @Valid TransferRequest request,
-            HttpServletRequest httpServletRequest) {
+            HttpServletRequest httpServletRequest, Authentication auth) {
+        
         String idempotencyKey = httpServletRequest.getHeader("Idempotency-Key");
         log.info("REST: Idempotent transfer request with key: {}", idempotencyKey);
         TransferResponse response = walletService.transfer(request, idempotencyKey);
@@ -53,24 +56,41 @@ public class WalletController {
 
     @PostMapping("/deposit")
     @Idempotent
+    @PreAuthorize(
+        "hasAuthority('SCOPE_internal:credit') or " +
+        "(hasAuthority('SCOPE_wallet:write') and @walletOwnershipGuard.assertWalletOwnership(#request.walletId(), #auth))"
+    )
     public ResponseEntity<WalletResponse> deposit(
-            @RequestBody @Valid DepositRequest request,
-            HttpServletRequest httpServletRequest) {
+        @RequestBody @Valid DepositRequest request,
+        HttpServletRequest httpServletRequest, Authentication auth) {
+            
         String idempotencyKey = httpServletRequest.getHeader("Idempotency-Key");
         log.info("REST: Idempotent deposit request with key: {}", idempotencyKey);
+        
         WalletResponse response = walletService.deposit(request, idempotencyKey);
         return ResponseEntity.ok(response);
     }
-
+        
     @GetMapping("/{walletId}")
-    public ResponseEntity<WalletResponse> getWallet(@PathVariable UUID walletId) {
+    @PreAuthorize(
+        "hasAuthority('SCOPE_wallet:read_all') or " +
+        "(hasAuthority('SCOPE_wallet:read') and @walletOwnershipGuard.assertWalletOwnership(#walletId, #auth))"
+    )
+    public ResponseEntity<WalletResponse> getWallet(@PathVariable UUID walletId, Authentication auth) {
+
         log.info("REST: Fetching wallet details for wallet ID: {}", walletId);
         WalletResponse response = walletService.getWallet(walletId);
         return ResponseEntity.ok(response);
     }
 
+
     @GetMapping("/user/{userId}")
-    public ResponseEntity<WalletResponse> getWalletByUserId(@PathVariable UUID userId) {
+    @PreAuthorize(
+        "hasAuthority('SCOPE_wallet:read_all') or " +
+        "(hasAuthority('SCOPE_wallet:read') and @walletOwnershipGuard.assertUserIdMatch(#userId, #auth))"
+    )
+    public ResponseEntity<WalletResponse> getWalletByUserId(@PathVariable UUID userId, Authentication auth) {
+
         log.info("REST: Fetching wallet details for user ID: {}", userId);
         WalletResponse response = walletService.getWalletByUserId(userId);
         return ResponseEntity.ok(response);
@@ -87,8 +107,12 @@ public class WalletController {
      * @return 200 with status payload, or 404 if the transaction does not exist
      */
     @GetMapping("/transactions/{transactionId}")
+    @PreAuthorize(
+        "hasAuthority('SCOPE_transaction:read_all') or " +
+        "(hasAuthority('SCOPE_transaction:read') and @walletOwnershipGuard.assertTransactionIdMatch(#transactionId, #auth))"
+    )
     public ResponseEntity<TransactionStatusResponse> getTransactionStatus(
-            @PathVariable UUID transactionId) {
+            @PathVariable UUID transactionId, Authentication auth) {
         log.info("REST: Polling status for transactionId: {}", transactionId);
         return transactionRepository.findById(transactionId)
                 .map(tx -> ResponseEntity.ok(TransactionStatusResponse.builder()

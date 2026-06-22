@@ -27,6 +27,13 @@ spring:
       connection-timeout: 20000
       max-lifetime: 1800000
 
+  data:
+    redis:
+      url: redis://${REDIS_HOST:localhost}:${REDIS_PORT:6379}
+  cache:
+    type: redis
+    redis:
+      time-to-live: 60s
   jpa:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
     hibernate:
@@ -46,6 +53,11 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+flash:
+  gateway:
+    services:
+      wallet-core-uri: ${WALLET_CORE_URI:http://localhost:8081}
+      audit-worker-uri: ${AUDIT_WORKER_URI:http://localhost:8082}
 
 logging:
   level:

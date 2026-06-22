@@ -22,13 +22,39 @@ public class SecurityConfig {
     
     @Bean
     public SecurityWebFilterChain springSecurityWebFilterChain(ServerHttpSecurity http) {
-        http.authorizeExchange(ex -> ex.pathMatchers("swagger-ui/**", "/v3/api-docs/***").permitAll()
-        .pathMatchers("/actuator/**").hasRole("ADMIN")
-        .pathMatchers(HttpMethod.GET, "/api/v1/audit/**").hasAnyRole("AUDITOR", "ADMIN")
-        .pathMatchers(HttpMethod.GET, "/api/v1/audit/failures").hasRole("ADMIN")
-        .pathMatchers(HttpMethod.POST, "/api/v1/wallets", "/api/v1/wallet/deposit", "/api/v1/wallets/transfer").hasAnyRole("CUSTOMER", "SERVICE_CLIENT")
-        .pathMatchers(HttpMethod.GET, "/api/v1/wallets/**").hasAnyRole("CUSTOMER", "AUDITOR", "ADMIN")
-        .anyExchange().authenticated());
+        http.authorizeExchange(ex -> ex
+                // 1. Public Documentation & Health Endpoints
+                .pathMatchers("/swagger-ui/**", "/v3/api-docs/**", "/swagger-resources/**").permitAll()
+                .pathMatchers("/actuator/health/**").permitAll() // Public K8s liveness/readiness
+                
+                // 2. Sensitive Actuator Endpoints (Metrics/Prometheus) — ADMIN only
+                .pathMatchers("/actuator/**").hasRole("ADMIN")
+
+                // 3. System Auditing (flash-audit-worker tracking) — ADMIN only
+                .pathMatchers(HttpMethod.GET, "/api/v1/audit/failures").hasRole("ADMIN")
+                
+                // 4. Compliance Logs — AUDITOR + ADMIN
+                .pathMatchers(HttpMethod.GET, "/api/v1/audit/**").hasAnyRole("ADMIN", "AUDITOR")
+                
+                // 5. NOTE: 'POST /api/v1/wallets' is REMOVED because provisioning is now async via Kafka!
+                
+                // 6. Wallet Financial Operations — CUSTOMER + SERVICE_CLIENT
+                .pathMatchers(HttpMethod.POST, "/api/v1/wallets/deposit").hasAnyRole("CUSTOMER", "SERVICE_CLIENT")
+                .pathMatchers(HttpMethod.POST, "/api/v1/wallets/transfer").hasAnyRole("CUSTOMER", "SERVICE_CLIENT")
+                
+                // 7. Transaction Status Polling — All Roles allowed at perimeter level
+                // (Must come BEFORE general /wallets/** path rules to prevent shadowed matching)
+                .pathMatchers(HttpMethod.GET, "/api/v1/wallets/transactions/**")
+                    .hasAnyRole("CUSTOMER", "SERVICE_CLIENT", "ADMIN", "AUDITOR")
+                
+                // 8. General Wallet Queries — CUSTOMER + SERVICE_CLIENT + ADMIN + AUDITOR
+                // (Added AUDITOR here based on our updated scope discussion so they can execute read operations)
+                .pathMatchers(HttpMethod.GET, "/api/v1/wallets/**")
+                    .hasAnyRole("CUSTOMER", "SERVICE_CLIENT", "ADMIN", "AUDITOR")
+                
+                // 9. Catch-all security net
+                .anyExchange().authenticated()
+            );
 
         http.csrf(ex -> ex.disable()); // currently no browser client
         http.oauth2ResourceServer(oauthResourceServer -> oauthResourceServer.jwt(jwt ->

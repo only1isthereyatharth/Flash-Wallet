@@ -17,7 +17,7 @@ import reactor.core.publisher.Mono;
  */
 @Component
 @RequiredArgsConstructor
-public class SecurityHeadersFilter implements WebFilter, Ordered {
+public final class SecurityHeadersFilter implements WebFilter, Ordered {
 
     private final ApiGatewayProperties properties;
 

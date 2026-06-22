@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 @Component
 @RequiredArgsConstructor
 @Slf4j
-public class AccessLogFilter implements GlobalFilter, Ordered {
+public final class AccessLogFilter implements GlobalFilter, Ordered {
 
     private final ApiGatewayProperties properties;
     private final LogSanitizer logSanitizer;
